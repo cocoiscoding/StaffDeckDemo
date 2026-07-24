@@ -22,8 +22,10 @@ cp .env.example .env
 
 Swagger UI: `http://localhost:5173/docs`
 
-The current production schema migration path supports SQLite only. Non-SQLite
-database URLs are not a supported deployment configuration.
+The application uses PostgreSQL as its primary database (via the `psycopg` driver).
+Schema initialization is performed by `SQLModel.metadata.create_all` on startup;
+for production schema evolution, use a migration tool such as Alembic. Configure
+the database connection via the `DATABASE_URL` environment variable.
 
 `CORS_ORIGINS` controls the allowed frontend origins. The root `scripts/dev_up.sh`
 sets the local single-port origin by default and can add a public tunnel origin with

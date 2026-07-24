@@ -37,7 +37,12 @@ class Settings(BaseSettings):
 
     # --- 应用基础配置 ---
     app_name: str = "Skill Agent Loop Service"  # 应用名称，用于 FastAPI 实例和健康检查
-    database_url: str = "sqlite:///./skill_agent_loop.db"  # 数据库连接字符串
+    # 数据库连接字符串。
+    # 默认连接本地 Docker 启动的 PostgreSQL（staffdeck-postgres 容器）。
+    # 各字段含义：
+    #   postgresql+psycopg://<用户>:<密码>@<主机>:<端口>/<库名>
+    # 生产环境务必通过 backend/.env 的 DATABASE_URL 覆盖。
+    database_url: str = "postgresql+psycopg://staffdeck:staffdeck123@localhost:5432/staffdeck"
     app_secret: str = "change-me-in-development"  # 加密/签名主密钥，生产环境必须通过环境变量覆盖
 
     # --- 初始账号密码 ---

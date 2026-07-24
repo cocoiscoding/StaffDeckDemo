@@ -19,11 +19,10 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from time import sleep
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from app.agents.schema import (
@@ -82,9 +81,6 @@ from app.security.auth import get_current_user
 from app.security.permissions import agent_owned_by_user as _agent_owned_by_user
 from app.security.permissions import is_admin_user as _is_admin_user
 from app.security.tenant import ensure_tenant
-
-IMPORT_LOCK_RETRY_ATTEMPTS = 2
-IMPORT_LOCK_RETRY_DELAY_SECONDS = 0.5
 
 # 企业管理端路由器，处理 Agent 的 CRUD 和资源管理
 enterprise_router = APIRouter(prefix="/api/enterprise/agents", tags=["enterprise:agents"])
@@ -529,9 +525,13 @@ def import_agent_resources(
     db: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ) -> dict[str, object]:
-    """从源 Agent 导入资源到目标 Agent（支持数据库锁重试）。
+    """从源 Agent 导入资源到目标 Agent。
 
-    当遇到数据库锁冲突时，自动重试最多 IMPORT_LOCK_RETRY_ATTEMPTS 次。
+    说明：
+        原版本为兼容 SQLite 的表级锁（"database is locked"）实现了重试循环。
+        切换到 PostgreSQL 后，PostgreSQL 使用 MVCC + 行锁，不存在整库锁定
+        场景，因此移除重试逻辑，直接执行一次即可。如遇并发冲突，
+        SQLAlchemy 会抛出 ``IntegrityError``，由上层统一异常处理。
 
     Args:
         agent_id: 目标 Agent ID。
@@ -541,19 +541,8 @@ def import_agent_resources(
 
     Returns:
         dict[str, object]: 包含导入结果（imported/missing 列表）。
-
-    Raises:
-        HTTPException 503: 资源导入繁忙（重试后仍失败）。
     """
-    for attempt in range(IMPORT_LOCK_RETRY_ATTEMPTS):
-        try:
-            return _import_agent_resources_once(agent_id, request, db, current_user)
-        except OperationalError as exc:
-            db.rollback()
-            if not _is_database_locked_error(exc) or attempt >= IMPORT_LOCK_RETRY_ATTEMPTS - 1:
-                raise
-            sleep(IMPORT_LOCK_RETRY_DELAY_SECONDS * (attempt + 1))
-    raise HTTPException(status_code=503, detail="Resource import is temporarily busy")
+    return _import_agent_resources_once(agent_id, request, db, current_user)
 
 
 def _import_agent_resources_once(
@@ -1175,11 +1164,6 @@ def agent_read(
         created_at=row.created_at.isoformat(),
         updated_at=row.updated_at.isoformat(),
     )
-
-
-def _is_database_locked_error(exc: OperationalError) -> bool:
-    """检查异常是否为 SQLite 数据库锁错误。"""
-    return "database is locked" in str(exc).lower()
 
 
 def _ensure_request_tenant(tenant_id: str, user: User) -> None:

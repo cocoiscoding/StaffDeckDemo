@@ -53,13 +53,15 @@ COPY backend/ ./backend/
 # single_port_app.py 通过 backend/../frontend-enterprise/dist 定位前端
 COPY --from=frontend-builder /build/frontend-enterprise/dist ./frontend-enterprise/dist
 
-# 创建数据目录（SQLite 数据库 + 通用技能运行时临时文件）
+# 创建数据目录（通用技能运行时临时文件；PostgreSQL 数据由外部数据库服务管理）
 RUN mkdir -p /data
 
-# 默认环境变量（可通过 docker run / K8s 覆盖）
+# 默认环境变量（可通过 docker run / K8s 覆盖）。
+# 数据库默认连接通过环境变量注入的 PostgreSQL 实例；生产部署应在 docker run / K8s
+# 中显式覆盖 DATABASE_URL、APP_SECRET 等敏感配置。
 ENV APP_HOST=0.0.0.0 \
     APP_PORT=5173 \
-    DATABASE_URL="sqlite:////data/skill_agent_loop.db" \
+    DATABASE_URL="postgresql+psycopg://staffdeck:staffdeck123@localhost:5432/staffdeck" \
     CORS_ORIGINS="*" \
     TOOL_BASE_URL="http://localhost:5173" \
     GENERAL_SKILL_RUNTIME_AUTO_INSTALL="false" \
