@@ -1,0 +1,188 @@
+name: release
+
+on:
+  push:
+    tags: ["v*", "[0-9]*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version used for manual packaging runs"
+        required: true
+        default: "0.1.0"
+
+jobs:
+  build:
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15        # Apple Silicon (arm64)
+            script: bash packaging/build_macos.sh
+          - os: macos-15-intel  # Intel (x86_64) — 无本地机器，靠 CI 出包
+            script: bash packaging/build_macos.sh
+          - os: ubuntu-latest
+            script: bash packaging/build_linux.sh
+          - os: windows-latest
+            script: pwsh packaging/build_windows.ps1
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install frontend deps
+        run: npm --prefix frontend-enterprise ci || npm --prefix frontend-enterprise install
+
+      - name: macOS tools
+        if: startsWith(matrix.os, 'macos')
+        run: brew install create-dmg
+
+      - name: Configure macOS signing
+        if: startsWith(matrix.os, 'macos')
+        env:
+          MAC_CERT_P12_BASE64: ${{ secrets.MAC_CERT_P12_BASE64 }}
+          MAC_CERT_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          MAC_SIGN_ID: ${{ secrets.MAC_SIGN_ID }}
+          KEYCHAIN_PASSWORD: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          if [ -z "$MAC_CERT_P12_BASE64" ]; then
+            echo "macOS signing secrets not configured; build will use ad-hoc signing."
+            exit 0
+          fi
+          missing=()
+          for secret_name in MAC_CERT_PASSWORD APPLE_ID APPLE_TEAM_ID APPLE_APP_PASSWORD; do
+            if [ -z "${!secret_name}" ]; then
+              missing+=("$secret_name")
+            fi
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "Missing macOS signing secret(s): ${missing[*]}" >&2
+            exit 1
+          fi
+          KEYCHAIN_PATH="$RUNNER_TEMP/staffdeck-signing.keychain-db"
+          P12_PATH="$RUNNER_TEMP/staffdeck-signing.p12"
+          cleanup() {
+            rm -f "$P12_PATH"
+          }
+          trap cleanup EXIT
+          echo "$MAC_CERT_P12_BASE64" | base64 --decode > "$P12_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$P12_PATH" -k "$KEYCHAIN_PATH" -P "$MAC_CERT_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
+          curl -fsSL https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer -o "$RUNNER_TEMP/DeveloperIDG2CA.cer"
+          security import "$RUNNER_TEMP/DeveloperIDG2CA.cer" -k "$KEYCHAIN_PATH"
+          xcrun notarytool store-credentials staffdeck-notary \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD" \
+            --keychain "$KEYCHAIN_PATH"
+          if [ -z "$MAC_SIGN_ID" ]; then
+            MAC_SIGN_ID="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | awk -F '"' '/Developer ID Application/ { print $2; exit }')"
+          fi
+          if [ -z "$MAC_SIGN_ID" ]; then
+            echo "No Developer ID Application identity found in the signing keychain." >&2
+            exit 1
+          fi
+          echo "MAC_SIGN_ID=$MAC_SIGN_ID" >> "$GITHUB_ENV"
+          echo "NOTARY_PROFILE=staffdeck-notary" >> "$GITHUB_ENV"
+          echo "NOTARY_KEYCHAIN=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+
+      - name: Linux tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ruby ruby-dev build-essential libfuse2
+          sudo gem install --no-document fpm
+          wget -O appimagetool https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool
+
+      - name: Windows tools
+        if: runner.os == 'Windows'
+        run: choco install innosetup -y
+
+      - name: Build
+        env:
+          VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+        run: ${{ matrix.script }}
+
+      - name: Windows general-skill smoke (python runtime)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dataDir = Join-Path $env:RUNNER_TEMP "staffdeck-smoke"
+          New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
+          $env:ULTRARAG_PORT = "5178"
+          $env:ULTRARAG_PORT_RANGE_START = "5178"
+          $env:ULTRARAG_PORT_RANGE_END = "5178"
+          $env:ULTRARAG_DATA_DIR = $dataDir
+          $env:STAFFDECK_HEADLESS = "1"
+          $p = Start-Process -FilePath "packaging/out/staffdeck/staffdeck.exe" -PassThru
+          try {
+            $health = $null
+            for ($i = 0; $i -lt 90; $i++) {
+              if ($p.HasExited) {
+                throw "staffdeck.exe exited early with code $($p.ExitCode)"
+              }
+              try {
+                $health = Invoke-RestMethod "http://127.0.0.1:5178/api/health" -TimeoutSec 2
+                break
+              } catch {
+                Start-Sleep -Seconds 1
+              }
+            }
+            if (-not $health) { throw "health check timed out" }
+            if ($health.status -ne "ok") { throw "health 异常: $($health.status)" }
+            # 深层导入回归（401 需登录属正常，只要不是 5xx / 连接失败）
+            try { Invoke-RestMethod "http://127.0.0.1:5178/api/enterprise/agents" | Out-Null }
+            catch {
+              if (-not $_.Exception.Response) { throw }
+              if ($_.Exception.Response.StatusCode.value__ -ge 500) { throw "agents 5xx" }
+            }
+            Write-Host "windows smoke ok"
+          } catch {
+            $log = Join-Path $dataDir "logs/staffdeck.log"
+            if (Test-Path $log) {
+              Write-Host "::group::staffdeck.log"
+              Get-Content $log -Tail 200
+              Write-Host "::endgroup::"
+            }
+            throw
+          } finally {
+            if (-not $p.HasExited) {
+              Stop-Process -Id $p.Id -Force
+            }
+          }
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: staffdeck-${{ matrix.os }}
+          path: packaging/out/StaffDeck-*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: artifacts/**/StaffDeck-*

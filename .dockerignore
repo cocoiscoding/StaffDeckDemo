@@ -1,0 +1,55 @@
+# 虚拟环境
+.venv/
+venv/
+backend/.venv/
+
+# 依赖目录
+node_modules/
+frontend-enterprise/node_modules/
+
+# 构建产物（容器内重新构建）
+dist/
+build/
+frontend-enterprise/dist/
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# 数据库文件（不打包进镜像，通过 PVC 持久化）
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# 环境变量（含敏感信息，通过 K8s Secret 注入）
+.env
+backend/.env
+
+# 开发工具
+.dev/
+.cursor/
+
+# IDE
+.vscode/
+.idea/
+
+# 打包产物
+packaging/out/
+packaging/build/
+packaging/runtime/
+packaging/runtime_dl/
+
+# 文档（不需要进镜像）
+docs/
+
+# 其他
+.DS_Store
+.git/
+.gitignore
+*.log

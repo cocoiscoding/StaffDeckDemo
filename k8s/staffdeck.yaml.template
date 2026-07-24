@@ -1,0 +1,168 @@
+# ============================================================
+# StaffDeck K8s 部署清单（模板）
+#
+# 使用方式：
+#   1. 复制此文件：cp k8s/staffdeck.yaml.template k8s/staffdeck.yaml
+#   2. 在 staffdeck.yaml 中填入实际密码和地址
+#   3. staffdeck.yaml 已被 .gitignore 排除，不会提交到 Git
+# ============================================================
+
+# ---------- Namespace ----------
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: staffdeck
+  labels:
+    app: staffdeck
+
+---
+# ---------- Secret（敏感信息）----------
+# ⚠️ 以下占位符必须替换为实际值！
+apiVersion: v1
+kind: Secret
+metadata:
+  name: staffdeck-secret
+  namespace: staffdeck
+type: Opaque
+stringData:
+  # 应用主密钥（生成方式：openssl rand -hex 32）
+  APP_SECRET: "REPLACE_WITH_RANDOM_SECRET"
+
+  # 模型 API Key
+  DEMO_MODEL_API_KEY: "REPLACE_WITH_YOUR_MODEL_API_KEY"
+
+  # admin 初始密码哈希（生成方式：python -c "from app.security.auth import hash_password; print(hash_password('你的密码'))"）
+  ADMIN_PASSWORD_HASH: "REPLACE_WITH_ADMIN_PASSWORD_HASH"
+
+  # user_demo 初始密码哈希
+  USER_DEMO_PASSWORD_HASH: "REPLACE_WITH_USER_DEMO_PASSWORD_HASH"
+
+---
+# ---------- ConfigMap（非敏感配置）----------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: staffdeck-config
+  namespace: staffdeck
+data:
+  # 模型服务地址（OpenAI 兼容接口）
+  DEMO_MODEL_BASE_URL: "https://your-model-endpoint/v1"
+  DEMO_MODEL_NAME: "your-model-name"
+
+  # 数据库（绝对路径，落在 PVC 挂载的 /data 目录）
+  DATABASE_URL: "sqlite:////data/skill_agent_loop.db"
+
+  # CORS — 改为实际访问地址（NodePort 端口默认 30517）
+  CORS_ORIGINS: "http://YOUR_NODE_IP:30517"
+
+  # 工具回调地址 — 改为实际访问地址
+  TOOL_BASE_URL: "http://YOUR_NODE_IP:30517"
+
+  # 通用技能运行时（生产环境关闭自动安装）
+  GENERAL_SKILL_RUNTIME_AUTO_INSTALL: "false"
+
+  # 绑定地址
+  APP_HOST: "0.0.0.0"
+  APP_PORT: "5173"
+
+---
+# ---------- PVC（SQLite 数据库持久化）----------
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: staffdeck-data
+  namespace: staffdeck
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  # storageClassName: ""  # 如果集群有特定 StorageClass，取消注释并指定
+
+---
+# ---------- Deployment ----------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: staffdeck
+  namespace: staffdeck
+  labels:
+    app: staffdeck
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: staffdeck
+  template:
+    metadata:
+      labels:
+        app: staffdeck
+    spec:
+      containers:
+        - name: staffdeck
+          image: staffdeck:latest   # 替换为公司镜像仓库地址
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5173
+              name: http
+              protocol: TCP
+
+          envFrom:
+            - configMapRef:
+                name: staffdeck-config
+            - secretRef:
+                name: staffdeck-secret
+
+          volumeMounts:
+            - name: data
+              mountPath: /data
+
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 5173
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 5
+
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 5173
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: staffdeck-data
+
+---
+# ---------- Service（NodePort）----------
+apiVersion: v1
+kind: Service
+metadata:
+  name: staffdeck
+  namespace: staffdeck
+spec:
+  type: NodePort
+  selector:
+    app: staffdeck
+  ports:
+    - port: 5173
+      targetPort: 5173
+      nodePort: 30517
+      name: http
+      protocol: TCP

@@ -1,0 +1,321 @@
+/**
+ * @file EmployeeCard.tsx
+ * @module components/EmployeeCard
+ * @description 数字员工卡片组件。以卡片形式展示员工头像、名称、岗位、在线状态、
+ *              描述、工作风格标签和资源统计信息，并提供对话、上下线、发布到广场、
+ *              编辑、设置头像、删除等操作菜单。
+ */
+
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui';
+import { cn } from '@/lib/utils';
+
+import IconChat from '../assets/icons/chat.svg?react';
+import IconEdit from '../assets/icons/edit.svg?react';
+import IconPlatform from '../assets/icons/nav-platform.svg?react';
+import IconImage from '../assets/icons/image.svg?react';
+import IconMore from '../assets/icons/more.svg?react';
+import IconPause from '../assets/icons/pause.svg?react';
+import IconPlay from '../assets/icons/play.svg?react';
+import IconTrash from '../assets/icons/trash.svg?react';
+import { isGalleryEmployee } from '../auth';
+import { employeeDisplayNameWithCreator, employeeProfile, resourceCount } from '../employee';
+import type { AgentProfileRead } from '../types';
+import EmployeeAvatar from './EmployeeAvatar';
+
+// 悬停颜色来自 DropdownMenuContent 上作用域化的 --accent/--accent-foreground 覆盖（见下文），
+// 因此菜单项在此只需布局 + 默认颜色。与 ScheduledTasksTab 操作菜单保持同步。
+/** 普通菜单项的 CSS 类名 */
+const MENU_ITEM_CLASS =
+  'cursor-pointer gap-[4px] rounded-[10px] px-[12px] py-[6px] text-[12px] text-[#858b9c] focus:text-[#18181a]';
+/** 危险操作菜单项的 CSS 类名（红色文字 + 红色悬停背景） */
+const MENU_ITEM_DANGER_CLASS =
+  'cursor-pointer gap-[4px] rounded-[10px] px-[12px] py-[6px] text-[12px] text-[#d20b0b] focus:bg-[#fce7e7] focus:text-[#d20b0b] focus:[&_svg]:text-[#d20b0b]!';
+
+/**
+ * 数字员工卡片组件的属性定义。
+ */
+export type EmployeeCardProps = {
+  /** 数字员工数据。 */
+  employee: AgentProfileRead;
+  /** 是否有管理权限（控制编辑/删除等操作是否可用）。 */
+  canManage: boolean;
+  /** 是否选中。 */
+  selected?: boolean;
+  /** 是否处于忙碌状态（禁用交互）。 */
+  busy?: boolean;
+  /** 是否显示右上角"更多"操作菜单。对话端广场隐藏。 */
+  showMenu?: boolean;
+  /** 打开员工详情的回调。 */
+  onOpen: () => void;
+  /** 切换员工状态的回调（上线/下线）。 */
+  onStatus: (status: 'active' | 'archived') => void;
+  /** 发布到广场/从广场下架的回调。 */
+  onGallery: (published: boolean) => void;
+  /** 删除员工的回调。 */
+  onDelete: () => void;
+  /** 设置头像的回调。 */
+  onAvatar: () => void;
+  /** 编辑资料的回调。 */
+  onEdit: () => void;
+  /** 发起对话的回调。 */
+  onChat: () => void;
+};
+
+/**
+ * 数字员工卡片组件。展示员工的完整概要信息，并集成操作菜单。
+ *
+ * @param props - 组件属性
+ * @param props.employee - 数字员工数据
+ * @param props.canManage - 是否有管理权限
+ * @param props.selected - 是否选中，默认 false
+ * @param props.busy - 是否忙碌，默认 false
+ * @param props.showMenu - 是否显示操作菜单，默认 true
+ * @param props.onOpen - 打开详情回调
+ * @param props.onStatus - 状态切换回调
+ * @param props.onGallery - 广场发布回调
+ * @param props.onDelete - 删除回调
+ * @param props.onAvatar - 设置头像回调
+ * @param props.onEdit - 编辑回调
+ * @param props.onChat - 对话回调
+ * @returns 渲染好的员工卡片元素
+ */
+export default function EmployeeCard({
+  employee,
+  canManage,
+  selected = false,
+  busy = false,
+  showMenu = true,
+  onOpen,
+  onStatus,
+  onGallery,
+  onDelete,
+  onAvatar,
+  onEdit,
+  onChat,
+}: EmployeeCardProps) {
+  // 解析员工档案信息
+  const profile = employeeProfile(employee);
+  // 统计各类资源数量
+  const sopCount = resourceCount(employee.resources, 'skill');
+  const skillCount = resourceCount(employee.resources, 'general_skill');
+  const kbCount = resourceCount(employee.resources, 'knowledge_base');
+  // 是否已发布到广场
+  const galleryPublished = isGalleryEmployee(employee);
+  // 在线状态判断
+  const online = employee.status === 'active';
+
+  // 在卡片上直接显示 API 原始值（绕过 staffdeckDisplayText 中的 SD1 术语重映射）
+  const rawRoleName = (employee.metadata?.role_name as string | undefined) || profile.roleName;
+  const displayName = employee.is_overall ? '开放广场' : employeeDisplayNameWithCreator(employee);
+  const displayDescription = employee.description || '暂无描述';
+
+  // 底部统计信息数组
+  const stats: Array<{ value: number; label: string }> = [
+    { value: kbCount, label: '资料' },
+    { value: skillCount, label: '技能' },
+    { value: sopCount, label: 'SOP' },
+  ];
+
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={() => {
+        if (!busy) onOpen();
+      }}
+      onKeyDown={(event) => {
+        if (!busy && (event.key === 'Enter' || event.key === ' ')) {
+          event.preventDefault();
+          onOpen();
+        }
+      }}
+      aria-pressed={selected}
+      aria-busy={busy}
+      className={cn(
+        'group relative flex h-full flex-col cursor-pointer overflow-visible rounded-[20px] border border-[#F6F6F6] bg-white py-[12px] px-[10px] transition-shadow',
+        '',
+        selected && 'shadow-[0_16px_30px_0_rgba(0,0,0,0.10)]',
+      )}
+    >
+      {/* 顶部信息条（比头像短，使头像插图从上方溢出） */}
+      <div className="flex rounded-[18px] h-[68px] box-border gap-[10px] bg-[#f6f6f6] p-[8px] mt-[34px]" >
+
+        {/* 头像插图——绝对定位，使头部超出灰色信息条上方 */}
+        <div className='w-[80px] relative'>
+          <div className='absolute inset-0 flex items-end justify-center'>
+            <EmployeeAvatar
+              agent={employee}
+              width={80}
+              height={94}
+              fit="contain"
+              objectPosition="center bottom"
+              className="overflow-visible! rounded-none! border-0! bg-transparent! bg-none! shadow-none! after:hidden!"
+            />
+          </div>
+          
+
+        </div>
+
+        {/* 名称 / 岗位 / 状态 */}
+        <div className="flex-1 flex flex-col gap-[2px]">
+          <strong className="truncate text-[12px] font-bold text-[#18181A]">
+            {employee.is_overall ? displayName : <span data-i18n-ignore>{displayName}</span>}
+          </strong>
+          <span className="truncate text-[10px] text-[#757F9C]">
+            {rawRoleName === '待补充岗位' ? rawRoleName : <span data-i18n-ignore>{rawRoleName}</span>}
+          </span>
+          <div className="leading-none">
+            <span className="inline-flex items-center gap-[2px] py-[2px] px-[4px] text-[8px] font-semibold text-[#757F9C] rounded-[90px] bg-white">
+              <i className={cn('size-[6px] shrink-0 rounded-full', online ? 'bg-[#22c55e]' : 'bg-[#9ca3af]')} aria-hidden="true" />
+              {online ? '在线' : '下线'}
+            </span>
+          </div>
+        </div>
+
+        {/* 对话按钮 */}
+        <button
+          type="button"
+          aria-label="发起对话"
+          disabled={!online || busy}
+          onClick={(event) => {
+            event.stopPropagation();
+            onChat();
+          }}
+          className="grid size-[28px] shrink-0 self-center place-items-center rounded-[10px] bg-white text-[#757F9C] transition-colors hover:text-[#18181A] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:text-[#757F9C]"
+        >
+          <IconChat className="size-[16px]!" />
+        </button>
+
+      </div>
+
+      {/* 操作菜单 */}
+      {showMenu && (
+      <div className="absolute right-[12px] top-[12px] z-20">
+        <DropdownMenu>
+          <DropdownMenuTrigger
+            aria-label="员工操作"
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={(event) => event.stopPropagation()}
+            className="grid size-7 place-items-center rounded-[10px] text-[#757F9C] transition-colors outline-none hover:bg-black/5 focus-visible:bg-black/5"
+          >
+            <IconMore className="size-[16px]!" />
+          </DropdownMenuTrigger>
+          <DropdownMenuContent
+            align="end"
+            className="flex w-auto min-w-[128px] flex-col gap-[4px] rounded-[14px] border-0 bg-white p-[4px] shadow-[0px_0px_8px_rgba(0,0,0,0.1)] ring-0 [--accent:#F6F6F6] [--accent-foreground:#18181A]"
+            onCloseAutoFocus={(event) => event.preventDefault()}
+          >
+            <DropdownMenuItem
+              className={MENU_ITEM_CLASS}
+              disabled={!online || busy}
+              onClick={(event) => event.stopPropagation()}
+              onSelect={() => onChat()}
+            >
+              <IconChat className="size-[16px]" />
+              发起对话
+            </DropdownMenuItem>
+            {online ? (
+              <DropdownMenuItem
+                className={MENU_ITEM_CLASS}
+                disabled={!canManage || busy}
+                onClick={(event) => event.stopPropagation()}
+                onSelect={() => onStatus('archived')}
+              >
+                <IconPause className="size-[16px]" />
+                下线
+              </DropdownMenuItem>
+            ) : (
+              <DropdownMenuItem
+                className={MENU_ITEM_CLASS}
+                disabled={!canManage || busy}
+                onClick={(event) => event.stopPropagation()}
+                onSelect={() => onStatus('active')}
+              >
+                <IconPlay className="size-[16px]" />
+                上线
+              </DropdownMenuItem>
+            )}
+            <DropdownMenuItem
+              className={MENU_ITEM_CLASS}
+              disabled={!canManage || busy}
+              onClick={(event) => event.stopPropagation()}
+              onSelect={() => onGallery(!galleryPublished)}
+            >
+              <IconPlatform className="size-[16px]" />
+              {galleryPublished ? '从广场下架' : '发布到广场'}
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              className={MENU_ITEM_CLASS}
+              disabled={!canManage || busy}
+              onClick={(event) => event.stopPropagation()}
+              onSelect={() => onEdit()}
+            >
+              <IconEdit className="size-[16px]" />
+              编辑资料
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              className={MENU_ITEM_CLASS}
+              disabled={!canManage || busy}
+              onClick={(event) => event.stopPropagation()}
+              onSelect={() => onAvatar()}
+            >
+              <IconImage className="size-[16px]" />
+              设置头像
+            </DropdownMenuItem>
+            <DropdownMenuSeparator className="my-[2px] bg-[#eef0f4]" />
+            <DropdownMenuItem
+              variant="destructive"
+              className={MENU_ITEM_DANGER_CLASS}
+              disabled={!canManage || busy}
+              onClick={(event) => event.stopPropagation()}
+              onSelect={() => onDelete()}
+            >
+              <IconTrash className="size-[16px]" />
+              删除
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+      )}
+
+      {/* 描述信息 */}
+      <p className="line-clamp-2 mt-[8px] h-[36px] shrink-0 text-[12px] leading-[18px] text-[#757F9C]">
+        {employee.description ? <span data-i18n-ignore>{displayDescription}</span> : displayDescription}
+      </p>
+
+      {/* 工作风格标签 */}
+      <div className="flex flex-wrap my-[8px] items-center gap-[10px]">
+        {profile.workStyles.slice(0, 3).map((item) => (
+          <span
+            key={item}
+            className="rounded-[20px] px-[8px] py-px text-[10px] leading-[13px] text-[#757f9c] border border-[#E3E7F1]"
+          >
+            <span data-i18n-ignore>{item}</span>
+          </span>
+        ))}
+      </div>
+
+      {/* 统计信息——固定在卡片底部 */}
+      <div className="mt-auto grid grid-cols-3 rounded-[14px] border border-[#E3E7F1] box-sizing: border-box">
+        {stats.map((stat, index) => (
+          <div
+            key={stat.label}
+            className={cn(
+              'flex flex-col justify-center gap-[4px] px-[20px] py-[6px]',
+              index < stats.length - 1 && 'border-r border-[#eef1f5]',
+            )}
+          >
+            <strong className="text-[18px] leading-[24px] font-bold text-[#18181A]">{stat.value}</strong>
+            <em className="text-[10px] not-italic text-[#464C5E]">{stat.label}</em>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
