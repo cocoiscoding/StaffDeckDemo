@@ -43,6 +43,9 @@ backend/skill_agent_loop.db*
 *.sqlite3
 *.db-shm
 *.db-wal
+
+# 本地改造记录文档（不提交到代码仓库）
+sqlite-to-pg-changes.md
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
