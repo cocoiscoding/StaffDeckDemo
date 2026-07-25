@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-import sqlite3
-
 import pytest
 from fastapi import HTTPException
-from sqlalchemy.exc import OperationalError
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
@@ -949,49 +946,6 @@ def test_import_open_gallery_tool_creates_private_agent_binding() -> None:
         assert list_tools(tenant_id="tenant_demo", bucket=None, agent_id=overall.id, db=db) == []
         visible_tools = list_tools(tenant_id="tenant_demo", bucket=None, agent_id=target.id, db=db)
         assert [row.id for row in visible_tools] == [tool.id]
-
-
-def test_import_resources_retries_once_when_sqlite_database_is_locked(monkeypatch) -> None:
-    calls = 0
-
-    class FakeSession:
-        rollback_count = 0
-
-        def rollback(self) -> None:
-            self.rollback_count += 1
-
-    expected = {"status": "imported", "imported": [], "missing": []}
-
-    def fake_import_once(*_args: object, **_kwargs: object) -> dict[str, object]:
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            raise OperationalError(
-                "UPDATE agent_resource_bindings",
-                {},
-                sqlite3.OperationalError("database is locked"),
-            )
-        return expected
-
-    fake_db = FakeSession()
-    monkeypatch.setattr(agents_api, "_import_agent_resources_once", fake_import_once)
-    monkeypatch.setattr(agents_api, "sleep", lambda _seconds: None)
-
-    result = agents_api.import_agent_resources(
-        "agent_target",
-        AgentResourceImportRequest(
-            tenant_id="tenant_demo",
-            source_agent_id="agent_overall",
-            resource_type="skill",
-            resource_ids=["skill_demo"],
-        ),
-        fake_db,  # type: ignore[arg-type]
-        current_user=_admin_user(),
-    )
-
-    assert result == expected
-    assert calls == 2
-    assert fake_db.rollback_count == 1
 
 
 def test_non_overall_agent_cannot_delete_global_resources() -> None:

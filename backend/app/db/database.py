@@ -81,6 +81,7 @@ def init_db() -> None:
     """
     import app.db.models  # noqa: F401  触发 SQLModel 表元数据注册
 
+    # 只执行 CREATE TABLE IF NOT EXISTS
     SQLModel.metadata.create_all(engine)
 
 

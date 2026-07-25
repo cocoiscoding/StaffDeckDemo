@@ -65,6 +65,7 @@ ENV APP_HOST=0.0.0.0 \
     CORS_ORIGINS="*" \
     TOOL_BASE_URL="http://localhost:5173" \
     GENERAL_SKILL_RUNTIME_AUTO_INSTALL="false" \
+    AUTO_INIT_DB="true" \
     PYTHONUNBUFFERED=1
 
 WORKDIR /app/backend

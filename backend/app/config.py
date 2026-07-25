@@ -85,6 +85,10 @@ class Settings(BaseSettings):
         extra="ignore",  # 忽略 .env / 环境中存在但 Settings 未定义的变量
     )
 
+    # 是否在启动时自动建表（create_all，幂等）。
+    # 开发/首次部署：true；生产稳定运行：false（schema 由外部管理）。
+    auto_init_db: bool = True
+
     @property
     def cors_origin_list(self) -> list[str]:
         """将逗号分隔的 ``cors_origins`` 字符串解析为去空白后的列表。

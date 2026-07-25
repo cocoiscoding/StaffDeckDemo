@@ -26,7 +26,8 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from sqlmodel import Session
+from sqlmodel import Session, SQLModel
+from sqlalchemy import inspect
 
 from app.api import (
     agents,
@@ -53,7 +54,7 @@ from app.db import engine, init_db
 from app.db.seed import seed_demo_data
 from app.scheduled_tasks.worker import start_background_worker, stop_background_worker
 
-# 加载全局配置（单例），用于配置 FastAPI 实例和 CORS 中间件
+# 加载全局配置（单例模式），用于配置 FastAPI 实例和 CORS 中间件
 settings = get_settings()
 
 # 创建 FastAPI 应用实例
@@ -78,15 +79,24 @@ app.add_middleware(
 @app.on_event("startup")
 def on_startup() -> None:
     """应用启动钩子。
-
+    
     执行以下初始化流程：
       1. 初始化数据库表结构（``init_db``）；
       2. 填充演示种子数据（``seed_demo_data``）；
       3. 启动定时任务后台工作器（``start_background_worker``）。
     """
-    init_db()  # 创建数据库表（如果不存在）
-    with Session(engine) as db:
-        seed_demo_data(db)  # 填充演示数据（仅首次启动时写入）
+    # 原代码为每次启动应用时都执行初始化数据库，但此操作是幂等的，已创建的表不会再重建或修改。
+    # init_db()  # 创建数据库表（如果不存在）
+
+    if settings.auto_init_db:
+        existing = set(inspect(engine).get_table_names())
+        required = set(SQLModel.metadata.tables.keys())
+        if not required.issubset(existing):
+            init_db()  # 仅在缺表时才建
+        
+        with Session(engine) as db:
+            seed_demo_data(db)  # 填充演示数据（仅首次启动时写入）
+
     start_background_worker()  # 启动定时任务调度工作线程
 
 
@@ -98,8 +108,8 @@ def on_shutdown() -> None:
       1. 停止定时任务后台工作器（``stop_background_worker``）；
       2. 关闭异步任务线程池（``shutdown_async_jobs``）。
     """
-    stop_background_worker()
-    shutdown_async_jobs()
+    stop_background_worker()  # 停止定时任务后台工作器（
+    shutdown_async_jobs()  # 关闭异步任务线程池（
 
 
 @app.get("/api/health", tags=["health"])
