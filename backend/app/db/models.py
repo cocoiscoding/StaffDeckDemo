@@ -43,16 +43,22 @@
 ``database.py``；初始演示数据见 ``seed.py``。
 """
 
+# 1. 开启 PEP 563 延迟注解求值（让类内部可以用尚未定义的类型作注解）
 from __future__ import annotations
 
+# 2. 标准库：datetime/UTC 用于时间戳；Optional 用于可选字段；uuid4 生成唯一ID
 from datetime import UTC, datetime
 from typing import Any, Optional
 from uuid import uuid4
 
+# 3. 第三方：SQLAlchemy 的 Column/JSON/UniqueConstraint 用于声明复合约束与JSON列
 from sqlalchemy import Column, JSON, UniqueConstraint
+# 4. 第三方：SQLModel 核心（Field 字段声明 / SQLModel 基类）
 from sqlmodel import Field, SQLModel
 
 
+# 0. 函数说明：返回去掉时区信息的当前 UTC 时间（naive datetime）
+#    URL：无（全局时间戳工厂，所有模型的 created_at/updated_at 都用它）
 def utc_now() -> datetime:
     """返回去掉时区信息的当前 UTC 时间。
 
@@ -62,9 +68,12 @@ def utc_now() -> datetime:
     Returns:
         datetime: 当前 UTC 时间（naive，``tzinfo=None``）。
     """
+    # 1. now(UTC) 拿到带 tzinfo 的 UTC 时间，再 replace(tzinfo=None) 转为 naive
     return datetime.now(UTC).replace(tzinfo=None)
 
 
+# 0. 函数说明：生成带业务前缀的全局唯一 ID（格式：{prefix}_{16位hex}）
+#    URL：无（全局ID工厂，所有模型的主键默认值都用它）
 def new_id(prefix: str) -> str:
     """生成带业务前缀的全局唯一 ID。
 
@@ -77,9 +86,12 @@ def new_id(prefix: str) -> str:
     Returns:
         str: 形如 ``{prefix}_{16hex}`` 的唯一标识符。
     """
+    # 1. 拼接：前缀 + UUID4 的前16位hex（uuid4().hex 是32位，截取16位足够避免碰撞）
     return f"{prefix}_{uuid4().hex[:16]}"
 
 
+# 0. 函数说明：租户表（多租户隔离的根实体，所有业务表都通过 tenant_id 关联回本表）
+#    URL：无（ORM 表定义）
 class Tenant(SQLModel, table=True):
     """租户表：平台多租户隔离的根实体。
 
@@ -87,14 +99,20 @@ class Tenant(SQLModel, table=True):
     关联回本表。租户本身只承载最基本的名称信息。
     """
 
-    __tablename__ = "tenants"
+    __tablename__ = "tenants"    # 显式表名（默认会用类名小写+s，但显式声明更稳）
 
+    # 1. 主键：租户ID（外部传入，如 seed 中固定为 "default"）
     id: str = Field(primary_key=True)
+    # 2. 租户名（展示用）
     name: str
+    # 3. 创建时间（默认当前 UTC）
     created_at: datetime = Field(default_factory=utc_now)
+    # 4. 更新时间（默认当前 UTC；注意：不会自动刷新，需业务代码主动赋值）
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+# 0. 函数说明：用户表（租户内的登录账号；联合唯一约束保证同租户内用户名不重复）
+#    URL：无（ORM 表定义）
 class User(SQLModel, table=True):
     """用户表：租户内的登录账号。
 
@@ -103,18 +121,29 @@ class User(SQLModel, table=True):
     """
 
     __tablename__ = "users"
+    # 1. 复合唯一约束：(tenant_id, username) 联合唯一（跨租户允许同名）
     __table_args__ = (UniqueConstraint("tenant_id", "username", name="uq_user_tenant_username"),)
 
+    # 2. 主键：用户ID（自动生成 user_xxxx 格式）
     id: str = Field(default_factory=lambda: new_id("user"), primary_key=True)
+    # 3. 所属租户ID（建索引，加速按租户过滤）
     tenant_id: str = Field(index=True)
+    # 4. 用户名（建索引，加速登录查找）
     username: str = Field(index=True)
+    # 5. 显示名（可空，前端展示用）
     display_name: Optional[str] = None
+    # 6. 角色：member/admin（默认 member；建索引，加速权限校验）
     role: str = Field(default="member", index=True)
+    # 7. 密码哈希（bcrypt；不存明文）
     password_hash: str
+    # 8. 创建时间
     created_at: datetime = Field(default_factory=utc_now)
+    # 9. 更新时间
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+# 0. 函数说明：技能表（智能体可执行流程的权威定义；content_json 描述步骤）
+#    URL：无（ORM 表定义）
 class Skill(SQLModel, table=True):
     """技能表：智能体可执行流程的权威定义。
 
@@ -124,21 +153,33 @@ class Skill(SQLModel, table=True):
     """
 
     __tablename__ = "skills"
+    # 1. 复合唯一约束：(tenant_id, skill_id) 联合唯一（skill_id 是业务标识，可与主键id不同）
     __table_args__ = (UniqueConstraint("tenant_id", "skill_id", name="uq_skill_tenant_skill_id"),)
 
+    # 2. 主键：内部ID（自动生成 skill_xxxx）
     id: str = Field(default_factory=lambda: new_id("skill"), primary_key=True)
+    # 3. 所属租户
     tenant_id: str = Field(index=True)
+    # 4. 业务技能ID（用户可见；不同于主键id）
     skill_id: str = Field(index=True)
+    # 5. 当前版本号（语义化版本，默认 1.0.0）
     version: str = "1.0.0"
+    # 6. 技能名（必填）
     name: str
+    # 7. 业务域（可空，用于分类）
     business_domain: Optional[str] = None
+    # 8. 描述（可空）
     description: Optional[str] = None
+    # 9. 技能正文（结构化JSON：步骤、节点、转换条件等）
     content_json: dict[str, Any] = Field(sa_column=Column(JSON, nullable=False))
+    # 10. 生命周期状态：draft/published（默认 draft）
     status: str = Field(default="draft", index=True)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+# 0. 函数说明：技能版本表（技能的历史版本快照；每次发布落一条记录便于回溯）
+#    URL：无（ORM 表定义）
 class SkillVersion(SQLModel, table=True):
     """技能版本表：技能的历史版本快照。
 
@@ -148,21 +189,28 @@ class SkillVersion(SQLModel, table=True):
     """
 
     __tablename__ = "skill_versions"
+    # 1. 复合唯一约束：(tenant_id, skill_id, version) 三元组唯一
     __table_args__ = (UniqueConstraint("tenant_id", "skill_id", "version", name="uq_skill_version"),)
 
+    # 2. 主键
     id: str = Field(default_factory=lambda: new_id("skillver"), primary_key=True)
     tenant_id: str = Field(index=True)
     skill_id: str = Field(index=True)
+    # 3. 版本号（语义化版本）
     version: str = Field(index=True)
+    # 4. 快照字段：把Skill发布当时的name/domain/description/content都复制一份
     name: str
     business_domain: Optional[str] = None
     description: Optional[str] = None
     content_json: dict[str, Any] = Field(sa_column=Column(JSON, nullable=False))
+    # 5. 版本状态：draft/published
     status: str = Field(default="draft", index=True)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+# 0. 函数说明：智能体技能分支表（单个智能体对某技能的私有派生 fork）
+#    URL：无（ORM 表定义）
 class AgentSkillBranch(SQLModel, table=True):
     """智能体技能分支表：单个智能体对某技能的私有派生（fork）。
 
@@ -173,25 +221,38 @@ class AgentSkillBranch(SQLModel, table=True):
     """
 
     __tablename__ = "agent_skill_branches"
+    # 1. 复合唯一约束：(tenant_id, agent_id, skill_id) 三元组唯一
     __table_args__ = (
         UniqueConstraint("tenant_id", "agent_id", "skill_id", name="uq_agent_skill_branch"),
     )
 
+    # 2. 主键
     id: str = Field(default_factory=lambda: new_id("agentbranch"), primary_key=True)
     tenant_id: str = Field(index=True)
+    # 3. 归属Agent
     agent_id: str = Field(index=True)
+    # 4. 业务技能ID
     skill_id: str = Field(index=True)
+    # 5. 源技能ID（用于追溯从哪个全局技能fork而来）
     source_skill_id: str = Field(index=True)
+    # 6. 派生起点版本（fork时的全局版本号）
     base_version: str = "1.0.0"
+    # 7. 分支当前头部版本（分支自己的版本号）
     head_version: str = "1.0.0"
+    # 8. 分支正文（结构化JSON）
     content_json: dict[str, Any] = Field(sa_column=Column(JSON, nullable=False))
+    # 9. 分支状态：active/inactive
     status: str = Field(default="active", index=True)
+    # 10. 同步状态：synced（与上游一致）/ diverged（已偏离）
     sync_state: str = Field(default="synced", index=True)
+    # 11. 扩展元数据（如创建者、来源画廊等）
     metadata_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+# 0. 函数说明：智能体技能分支版本表（分支上每次变更的版本快照）
+#    URL：无（ORM 表定义）
 class AgentSkillBranchVersion(SQLModel, table=True):
     """智能体技能分支版本表：分支上每次变更的版本快照。
 
@@ -200,25 +261,34 @@ class AgentSkillBranchVersion(SQLModel, table=True):
     """
 
     __tablename__ = "agent_skill_branch_versions"
+    # 1. 复合唯一约束：四元组唯一（同一Agent的同一技能分支的同一版本号只能一条）
     __table_args__ = (
         UniqueConstraint("tenant_id", "agent_id", "skill_id", "version", name="uq_agent_skill_branch_version"),
     )
 
+    # 2. 主键
     id: str = Field(default_factory=lambda: new_id("agentbranchver"), primary_key=True)
     tenant_id: str = Field(index=True)
     agent_id: str = Field(index=True)
     skill_id: str = Field(index=True)
     source_skill_id: str = Field(index=True)
+    # 3. 本次版本号
     version: str = Field(index=True)
+    # 4. 基线版本（本次变更基于哪个版本）
     base_version: str = "1.0.0"
+    # 5. 快照正文
     content_json: dict[str, Any] = Field(sa_column=Column(JSON, nullable=False))
     status: str = Field(default="active", index=True)
+    # 6. 分支版本默认就是已偏离（diverged）
     sync_state: str = Field(default="diverged", index=True)
+    # 7. 变更摘要（人类可读的本次变更说明）
     change_summary: Optional[str] = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+# 0. 函数说明：通用技能表（以 Markdown + 附件文件形式表达的技能，slug 为业务唯一标识）
+#    URL：无（ORM 表定义）
 class GeneralSkill(SQLModel, table=True):
     """通用技能表：以 Markdown + 附件文件形式表达的技能。
 
@@ -228,24 +298,37 @@ class GeneralSkill(SQLModel, table=True):
     """
 
     __tablename__ = "general_skills"
+    # 1. 复合唯一约束：(tenant_id, slug) 联合唯一
     __table_args__ = (UniqueConstraint("tenant_id", "slug", name="uq_general_skill_tenant_slug"),)
 
+    # 2. 主键
     id: str = Field(default_factory=lambda: new_id("genskill"), primary_key=True)
     tenant_id: str = Field(index=True)
+    # 3. URL友好的技能标识（如 "data-analyst"）
     slug: str = Field(index=True)
+    # 4. 技能名（必填）
     name: str
     description: Optional[str] = None
+    # 5. 主页URL（可空，指向技能的详细文档）
     homepage: Optional[str] = None
+    # 6. 技能正文（Markdown 格式）
     skill_markdown: str
+    # 7. 附件文件清单（JSON数组，每项是 {path, size, ...}）
     skill_files_json: list[dict[str, Any]] = Field(default_factory=list, sa_column=Column(JSON))
+    # 8. 扩展元数据
     metadata_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    # 9. 生命周期状态
     status: str = Field(default="draft", index=True)
+    # 10. 权限配置（谁能看/谁能用）
     permissions_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    # 11. 运行时配置（执行超时、重试策略等）
     runtime_config_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+# 0. 函数说明：知识库表（知识资源的容器；通过 tenant_id+name 唯一约束）
+#    URL：无（ORM 表定义）
 class KnowledgeBase(SQLModel, table=True):
     """知识库表：知识资源的容器与组织单元。
 
@@ -254,18 +337,25 @@ class KnowledgeBase(SQLModel, table=True):
     """
 
     __tablename__ = "knowledge_bases"
+    # 1. 复合唯一约束：(tenant_id, name) 联合唯一
     __table_args__ = (UniqueConstraint("tenant_id", "name", name="uq_knowledge_base_tenant_name"),)
 
+    # 2. 主键
     id: str = Field(default_factory=lambda: new_id("kb"), primary_key=True)
     tenant_id: str = Field(index=True)
+    # 3. 知识库名（必填，租户内唯一）
     name: str
     description: Optional[str] = None
+    # 4. 状态：active/inactive
     status: str = Field(default="active", index=True)
+    # 5. 扩展元数据
     metadata_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+# 0. 函数说明：知识库版本表（知识库的版本快照；子实体通过 version_id 关联到具体版本）
+#    URL：无（ORM 表定义）
 class KnowledgeBaseVersion(SQLModel, table=True):
     """知识库版本表：知识库的版本快照。
 
@@ -275,14 +365,18 @@ class KnowledgeBaseVersion(SQLModel, table=True):
     """
 
     __tablename__ = "knowledge_base_versions"
+    # 1. 复合唯一约束：三元组唯一
     __table_args__ = (
         UniqueConstraint("tenant_id", "knowledge_base_id", "version", name="uq_knowledge_base_version"),
     )
 
+    # 2. 主键
     id: str = Field(default_factory=lambda: new_id("kbver"), primary_key=True)
     tenant_id: str = Field(index=True)
     knowledge_base_id: str = Field(index=True)
+    # 3. 版本号（默认 1.0.0）
     version: str = Field(default="1.0.0", index=True)
+    # 4. 快照名（发布当时的知识库名）
     name: str
     description: Optional[str] = None
     status: str = Field(default="active", index=True)
@@ -291,6 +385,8 @@ class KnowledgeBaseVersion(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+# 0. 函数说明：智能体知识分支表（单个智能体对某知识库的私有派生 fork）
+#    URL：无（ORM 表定义）
 class AgentKnowledgeBranch(SQLModel, table=True):
     """智能体知识分支表：单个智能体对某知识库的私有派生。
 
@@ -299,23 +395,30 @@ class AgentKnowledgeBranch(SQLModel, table=True):
     """
 
     __tablename__ = "agent_knowledge_branches"
+    # 1. 复合唯一约束：(tenant_id, agent_id, knowledge_base_id) 三元组唯一
     __table_args__ = (
         UniqueConstraint("tenant_id", "agent_id", "knowledge_base_id", name="uq_agent_knowledge_branch"),
     )
 
+    # 2. 主键
     id: str = Field(default_factory=lambda: new_id("agentkb"), primary_key=True)
     tenant_id: str = Field(index=True)
     agent_id: str = Field(index=True)
     knowledge_base_id: str = Field(index=True)
+    # 3. 派生起点版本（fork时的全局知识库版本号）
     base_version: str = "1.0.0"
+    # 4. 分支当前头部版本
     head_version: str = "1.0.0"
     status: str = Field(default="active", index=True)
+    # 5. 同步状态：synced/diverged
     sync_state: str = Field(default="synced", index=True)
     metadata_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+# 0. 函数说明：知识文档表（被摄取进知识库的原始文档记录；跟踪处理状态）
+#    URL：无（ORM 表定义）
 class KnowledgeDocument(SQLModel, table=True):
     """知识文档表：被摄取进知识库的原始文档记录。
 
@@ -325,22 +428,32 @@ class KnowledgeDocument(SQLModel, table=True):
 
     __tablename__ = "knowledge_documents"
 
+    # 1. 主键
     id: str = Field(default_factory=lambda: new_id("kdoc"), primary_key=True)
     tenant_id: str = Field(index=True)
     knowledge_base_id: str = Field(index=True)
+    # 2. 关联的知识库版本（可空，表示尚未锁定到具体版本）
     knowledge_base_version_id: Optional[str] = Field(default=None, index=True)
+    # 3. 文件名（必填）
     filename: str
+    # 4. 文件类型（pdf/md/txt 等）
     file_type: str = Field(index=True)
     title: Optional[str] = None
+    # 5. 处理状态：processing/ready/failed
     status: str = Field(default="processing", index=True)
+    # 6. 切分后的桶数量（摄取完成后回填）
     bucket_count: int = 0
+    # 7. 切分后的块数量
     chunk_count: int = 0
     metadata_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    # 8. 失败原因（status=failed 时填充）
     error: Optional[str] = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+# 0. 函数说明：知识桶表（文档切分后的中粒度分组；用于粗筛+上下文组装）
+#    URL：无（ORM 表定义）
 class KnowledgeBucket(SQLModel, table=True):
     """知识桶表：文档切分后的中粒度分组。
 
@@ -350,20 +463,28 @@ class KnowledgeBucket(SQLModel, table=True):
 
     __tablename__ = "knowledge_buckets"
 
+    # 1. 主键
     id: str = Field(default_factory=lambda: new_id("kbucket"), primary_key=True)
     tenant_id: str = Field(index=True)
     knowledge_base_id: str = Field(index=True)
     knowledge_base_version_id: Optional[str] = Field(default=None, index=True)
+    # 2. 所属文档
     document_id: str = Field(index=True)
+    # 3. 桶键（文档内的唯一标识，用于稳定引用）
     bucket_key: str = Field(index=True)
+    # 4. 桶标题（必填）
     title: str
+    # 5. 桶摘要（用于检索时粗筛）
     summary: str
+    # 6. token 数估算（用于上下文长度控制）
     token_estimate: int = 0
     metadata_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+# 0. 函数说明：知识块表（检索的最小粒度文本片段；含 source_ref 便于溯源）
+#    URL：无（ORM 表定义）
 class KnowledgeChunk(SQLModel, table=True):
     """知识块表：检索的最小粒度文本片段。
 
@@ -373,21 +494,28 @@ class KnowledgeChunk(SQLModel, table=True):
 
     __tablename__ = "knowledge_chunks"
 
+    # 1. 主键
     id: str = Field(default_factory=lambda: new_id("kchunk"), primary_key=True)
     tenant_id: str = Field(index=True)
     knowledge_base_id: str = Field(index=True)
     knowledge_base_version_id: Optional[str] = Field(default=None, index=True)
     document_id: str = Field(index=True)
+    # 2. 所属桶
     bucket_id: str = Field(index=True)
+    # 3. 桶内顺序（从0开始）
     chunk_index: int = Field(index=True)
+    # 4. 块正文（必填，检索的实际文本）
     content: str
     summary: Optional[str] = None
+    # 5. 原文档位置引用（页码/行号/锚点等，用于溯源）
     source_ref: Optional[str] = None
     metadata_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+# 0. 函数说明：知识概念表（从知识中抽取的结构化概念实体；Markdown+frontmatter）
+#    URL：无（ORM 表定义）
 class KnowledgeConcept(SQLModel, table=True):
     """知识概念表：从知识中抽取的结构化概念实体。
 
@@ -398,6 +526,7 @@ class KnowledgeConcept(SQLModel, table=True):
     """
 
     __tablename__ = "knowledge_concepts"
+    # 1. 复合唯一约束：三元组唯一
     __table_args__ = (
         UniqueConstraint(
             "tenant_id",
@@ -407,25 +536,36 @@ class KnowledgeConcept(SQLModel, table=True):
         ),
     )
 
+    # 2. 主键
     id: str = Field(default_factory=lambda: new_id("kconcept"), primary_key=True)
     tenant_id: str = Field(index=True)
     knowledge_base_id: str = Field(index=True)
     knowledge_base_version_id: Optional[str] = Field(default=None, index=True)
     document_id: Optional[str] = Field(default=None, index=True)
+    # 3. 业务概念ID（版本内唯一）
     concept_id: str = Field(index=True)
+    # 4. 概念类别（如 entity/relation/process 等）
     concept_type: str = Field(index=True)
+    # 5. 概念标题（必填）
     title: str
     description: Optional[str] = None
+    # 6. 概念正文（Markdown 格式）
     content_md: str
+    # 7. frontmatter 元数据（YAML 头部解析后的字典）
     frontmatter_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    # 8. 概念间链接（出边）
     links_json: list[dict[str, Any]] = Field(default_factory=list, sa_column=Column(JSON))
+    # 9. 引用列表
     citations_json: list[dict[str, Any]] = Field(default_factory=list, sa_column=Column(JSON))
+    # 10. 来源引用（文档位置等）
     source_refs_json: list[dict[str, Any]] = Field(default_factory=list, sa_column=Column(JSON))
     status: str = Field(default="active", index=True)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+# 0. 函数说明：知识发现建议表（摄取阶段自动产出、待人工评审的建议）
+#    URL：无（ORM 表定义）
 class KnowledgeDiscoverySuggestion(SQLModel, table=True):
     """知识发现建议表：摄取阶段自动产出的待审核建议。
 
@@ -436,22 +576,29 @@ class KnowledgeDiscoverySuggestion(SQLModel, table=True):
 
     __tablename__ = "knowledge_discovery_suggestions"
 
+    # 1. 主键
     id: str = Field(default_factory=lambda: new_id("kdisc"), primary_key=True)
     tenant_id: str = Field(index=True)
     knowledge_base_id: str = Field(index=True)
     knowledge_base_version_id: Optional[str] = Field(default=None, index=True)
     document_id: str = Field(index=True)
     bucket_id: Optional[str] = Field(default=None, index=True)
+    # 2. 建议类型（new_concept/missing_link/merge 等）
     suggestion_type: str = Field(index=True)
     title: str
+    # 3. 审核状态：pending/accepted/rejected
     status: str = Field(default="pending", index=True)
+    # 4. 建议载荷（具体内容）
     payload_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     source_refs_json: list[dict[str, Any]] = Field(default_factory=list, sa_column=Column(JSON))
+    # 5. 产出依据（为什么提这条建议）
     reason: Optional[str] = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+# 0. 函数说明：知识摄取任务表（跟踪单次文档摄取流水线的执行进度）
+#    URL：无（ORM 表定义）
 class KnowledgeIngestJob(SQLModel, table=True):
     """知识摄取任务表：跟踪单次文档摄取流水线的执行。
 
@@ -461,23 +608,32 @@ class KnowledgeIngestJob(SQLModel, table=True):
 
     __tablename__ = "knowledge_ingest_jobs"
 
+    # 1. 主键
     id: str = Field(default_factory=lambda: new_id("kjob"), primary_key=True)
     tenant_id: str = Field(index=True)
     knowledge_base_id: str = Field(index=True)
     knowledge_base_version_id: Optional[str] = Field(default=None, index=True)
     document_id: Optional[str] = Field(default=None, index=True)
+    # 2. 文件名（必填）
     filename: str
+    # 3. 整体状态：queued/running/completed/failed
     status: str = Field(default="queued", index=True)
+    # 4. 当前阶段（如 "parsing"/"chunking"/"indexing"）
     stage: str = "queued"
+    # 5. 进度值 0.0~1.0
     progress: float = 0.0
     error: Optional[str] = None
     metadata_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=utc_now)
+    # 6. 实际开始时间（running 时填充）
     started_at: Optional[datetime] = None
+    # 7. 实际结束时间（completed/failed 时填充）
     finished_at: Optional[datetime] = None
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+# 0. 函数说明：模型配置表（LLM 接入参数 + 可信校验状态 + 三组 revision 检测变更）
+#    URL：无（ORM 表定义）
 class ModelConfig(SQLModel, table=True):
     """模型配置表：LLM 接入参数与可信校验状态。
 
@@ -492,37 +648,63 @@ class ModelConfig(SQLModel, table=True):
 
     __tablename__ = "model_configs"
 
+    # 1. 主键
     id: str = Field(default_factory=lambda: new_id("model"), primary_key=True)
     tenant_id: str = Field(index=True)
+    # 2. 配置名（用户可见，同租户内不强制唯一）
     name: str
+    # 3. 提供商标识（默认 openai_compatible）
     provider: str = "openai_compatible"
+    # 4. API协议类型（决定请求体格式：openai_chat_completions / anthropic_messages 等）
     api_protocol: str = Field(default="openai_chat_completions", index=True)
+    # 5. 接入端点（可空，部分协议有默认值）
     base_url: Optional[str] = None
+    # 6. 加密后的API密钥（Fernet 等对称加密；不存明文）
     api_key_encrypted: str
+    # 7. 模型名（如 "gpt-4o-mini"）
     model: str
+    # 8. 采样温度（默认 0.2，偏确定性）
     temperature: float = 0.2
+    # 9. 最大输出 token 数
     max_output_tokens: int = 8192
+    # 10. 额外请求体字段（透传给LLM API）
     extra_body_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    # 11. 协议级选项（如 anthropic 的 beta header）
     protocol_options_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    # 12. 遗留未映射选项（兼容旧数据用，不再使用）
     legacy_unmapped_options_json: dict[str, Any] = Field(
         default_factory=dict, sa_column=Column(JSON)
     )
+    # 13. 可信状态：unverified/trusted/untrusted（默认未验证）
     trust_status: str = Field(default="unverified", index=True)
+    # 14. 最近一次校验的时间
     verified_at: Optional[datetime] = None
+    # 15. 最近一次校验的指纹（用于判断配置是否变更）
     verified_fingerprint: Optional[str] = None
+    # 16. 当前校验任务ID（可空）
     verification_attempt_id: Optional[str] = None
+    # 17. 当前校验任务开始时间
     verification_started_at: Optional[datetime] = None
+    # 18. 当前校验任务状态：idle/running/succeeded/failed
     verification_attempt_status: str = Field(default="idle", index=True)
+    # 19. 当前校验任务失败错误码
     verification_attempt_error_code: Optional[str] = None
+    # 20. 配置 revision（每次修改 config 字段 +1，触发重新校验）
     config_revision: int = 1
+    # 21. 安全 revision（每次修改安全相关字段 +1）
     security_revision: int = 1
+    # 22. 密钥 revision（每次换 API key +1）
     key_revision: int = 1
+    # 23. 是否租户默认模型（每租户最多一条 is_default=True）
     is_default: bool = False
+    # 24. 是否启用（False 时该模型不可被选用）
     enabled: bool = True
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+# 0. 函数说明：人设配置表（租户级系统提示词；每租户一条，用 tenant_id 作主键）
+#    URL：无（ORM 表定义）
 class PersonaConfig(SQLModel, table=True):
     """人设配置表：租户级系统提示词。
 
@@ -532,12 +714,16 @@ class PersonaConfig(SQLModel, table=True):
 
     __tablename__ = "persona_configs"
 
+    # 1. 主键直接用 tenant_id（一租户一条）
     tenant_id: str = Field(primary_key=True)
+    # 2. 系统人设提示词（必填）
     system_prompt: str
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+# 0. 函数说明：UI/行为配置表（租户级前端展示开关 + 智能体循环上限）
+#    URL：无（ORM 表定义）
 class UIConfig(SQLModel, table=True):
     """UI/行为配置表：租户级前端展示与智能体循环开关。
 
@@ -548,16 +734,24 @@ class UIConfig(SQLModel, table=True):
 
     __tablename__ = "ui_configs"
 
+    # 1. 主键直接用 tenant_id
     tenant_id: str = Field(primary_key=True)
+    # 2. 是否展示思考轨迹（默认 True）
     show_thinking_trace: bool = True
+    # 3. 是否展示技能轨迹
     show_skill_trace: bool = True
+    # 4. 是否展示工具轨迹
     show_tool_trace: bool = True
+    # 5. 反思循环最大轮数（默认 1 轮）
     reflection_max_rounds: int = 1
+    # 6. 智能体单轮最大动作数（防止无限循环）
     agent_loop_max_actions: int = 6
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+# 0. 函数说明：智能体画像表（定义一个可被调用的智能体；is_overall 标记全局智能体）
+#    URL：无（ORM 表定义）
 class AgentProfile(SQLModel, table=True):
     """智能体画像表：定义一个可被调用的智能体。
 
@@ -567,20 +761,29 @@ class AgentProfile(SQLModel, table=True):
     """
 
     __tablename__ = "agent_profiles"
+    # 1. 复合唯一约束：(tenant_id, name) 联合唯一
     __table_args__ = (UniqueConstraint("tenant_id", "name", name="uq_agent_profile_tenant_name"),)
 
+    # 2. 主键
     id: str = Field(default_factory=lambda: new_id("agent"), primary_key=True)
     tenant_id: str = Field(index=True)
+    # 3. 智能体名（租户内唯一）
     name: str
     description: Optional[str] = None
+    # 4. 人设提示词（注入到 system prompt）
     persona_prompt: Optional[str] = None
+    # 5. 是否为全局智能体（整体画廊入口；True 时无具体绑定）
     is_overall: bool = Field(default=False, index=True)
+    # 6. 状态：active/inactive
     status: str = Field(default="active", index=True)
+    # 7. 扩展元数据（创建者、画廊发布标志、隐藏标志等）
     metadata_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+# 0. 函数说明：智能体使用关系表（记录用户与智能体的关联；三元组唯一）
+#    URL：无（ORM 表定义）
 class AgentUsage(SQLModel, table=True):
     """智能体使用关系表：记录用户与智能体的关联。
 
@@ -590,19 +793,24 @@ class AgentUsage(SQLModel, table=True):
     """
 
     __tablename__ = "agent_usages"
+    # 1. 复合唯一约束：(tenant_id, user_id, agent_id) 三元组唯一
     __table_args__ = (
         UniqueConstraint("tenant_id", "user_id", "agent_id", name="uq_agent_usage_user_agent"),
     )
 
+    # 2. 主键
     id: str = Field(default_factory=lambda: new_id("agentuse"), primary_key=True)
     tenant_id: str = Field(index=True)
     user_id: str = Field(index=True)
     agent_id: str = Field(index=True)
+    # 3. 扩展元数据（如最近使用时间、偏好设置）
     metadata_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+# 0. 函数说明：智能体模型绑定表（为智能体的不同角色指定模型；三元组唯一）
+#    URL：无（ORM 表定义）
 class AgentModelBinding(SQLModel, table=True):
     """智能体模型绑定表：为智能体的不同角色指定模型。
 
@@ -612,19 +820,25 @@ class AgentModelBinding(SQLModel, table=True):
     """
 
     __tablename__ = "agent_model_bindings"
+    # 1. 复合唯一约束：(tenant_id, agent_id, role) 三元组唯一
     __table_args__ = (
         UniqueConstraint("tenant_id", "agent_id", "role", name="uq_agent_model_binding"),
     )
 
+    # 2. 主键
     id: str = Field(default_factory=lambda: new_id("agentmodel"), primary_key=True)
     tenant_id: str = Field(index=True)
     agent_id: str = Field(index=True)
+    # 3. 角色名：default/router/step/response/general_skill 等
     role: str = Field(default="default", index=True)
+    # 4. 绑定的 ModelConfig ID
     model_config_id: str = Field(index=True)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+# 0. 函数说明：智能体资源绑定表（将技能/知识库等资源挂载到智能体；四元组唯一）
+#    URL：无（ORM 表定义）
 class AgentResourceBinding(SQLModel, table=True):
     """智能体资源绑定表：将技能/知识库等资源挂载到智能体。
 
@@ -634,21 +848,28 @@ class AgentResourceBinding(SQLModel, table=True):
     """
 
     __tablename__ = "agent_resource_bindings"
+    # 1. 复合唯一约束：四元组唯一（防止同一资源被重复绑定到同一Agent）
     __table_args__ = (
         UniqueConstraint("tenant_id", "agent_id", "resource_type", "resource_id", name="uq_agent_resource"),
     )
 
+    # 2. 主键
     id: str = Field(default_factory=lambda: new_id("agentres"), primary_key=True)
     tenant_id: str = Field(index=True)
     agent_id: str = Field(index=True)
+    # 3. 资源类别：skill/general_skill/knowledge_base/tool
     resource_type: str = Field(index=True)
+    # 4. 资源ID（指向具体资源表的主键）
     resource_id: str = Field(index=True)
+    # 5. 绑定状态：active/inactive
     status: str = Field(default="active", index=True)
     metadata_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+# 0. 函数说明：工具表（可被智能体调用的外部 HTTP/MCP 工具定义）
+#    URL：无（ORM 表定义）
 class Tool(SQLModel, table=True):
     """工具表：可被智能体调用的外部 HTTP/MCP 工具定义。
 
@@ -659,29 +880,46 @@ class Tool(SQLModel, table=True):
     """
 
     __tablename__ = "tools"
+    # 1. 复合唯一约束：(tenant_id, name) 联合唯一
     __table_args__ = (UniqueConstraint("tenant_id", "name", name="uq_tool_tenant_name"),)
 
+    # 2. 主键
     id: str = Field(default_factory=lambda: new_id("tool"), primary_key=True)
     tenant_id: str = Field(index=True)
+    # 3. 工具名（租户内唯一）
     name: str = Field(index=True)
     display_name: Optional[str] = None
     description: Optional[str] = None
+    # 4. 分桶（用于UI分组，默认"未分桶"）
     bucket: str = Field(default="未分桶", index=True)
+    # 5. 工具类型：http/mcp
     tool_type: str = Field(default="http", index=True)
+    # 6. HTTP方法：GET/POST/PUT/DELETE
     method: str
+    # 7. 调用URL
     url: str
+    # 8. 请求头
     headers_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    # 9. 鉴权配置（bearer/basic/api_key 等）
     auth_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    # 10. 其他配置（超时、重试等）
     config_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    # 11. 输入参数 schema（JSON Schema 格式）
     input_schema: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    # 12. 输出参数 schema
     output_schema: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    # 13. 允许调用此工具的技能白名单（空=全部允许）
     allowed_skills_json: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+    # 14. 来源MCP服务器ID（tool_type=mcp 时填充）
     mcp_server_id: Optional[str] = Field(default=None, index=True)
+    # 15. 是否启用
     enabled: bool = True
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+# 0. 函数说明：MCP 服务器表（Model Context Protocol 服务器的连接配置；支持多种传输方式）
+#    URL：无（ORM 表定义）
 class MCPServer(SQLModel, table=True):
     """MCP 服务器表：Model Context Protocol 服务器的连接配置。
 
@@ -692,32 +930,38 @@ class MCPServer(SQLModel, table=True):
     """
 
     __tablename__ = "mcp_servers"
+    # 1. 复合唯一约束：(tenant_id, name) 联合唯一
     __table_args__ = (UniqueConstraint("tenant_id", "name", name="uq_mcp_server_tenant_name"),)
 
+    # 2. 主键
     id: str = Field(default_factory=lambda: new_id("mcpsrv"), primary_key=True)
     tenant_id: str = Field(index=True)
     name: str = Field(index=True)
     display_name: Optional[str] = None
     description: Optional[str] = None
+    # 3. 分桶（默认"MCP 工具"）
     bucket: str = Field(default="MCP 工具", index=True)
-    # 连接方式：stdio / streamable_http / sse / builtin
+    # 4. 连接方式：stdio / streamable_http / sse / builtin
     transport: str = Field(default="streamable_http", index=True)
-    # streamable_http / sse 使用
+    # 5. streamable_http / sse 使用：URL
     url: Optional[str] = None
     headers_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
-    # stdio 使用
+    # 6. stdio 使用：可执行命令 + 参数 + 环境变量 + 工作目录
     command: Optional[str] = None
     args_json: list[str] = Field(default_factory=list, sa_column=Column(JSON))
     env_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     cwd: Optional[str] = None
-    # 最近一次发现的原始工具定义（预览/审计用）
+    # 7. 最近一次发现的原始工具定义（预览/审计用）
     discovered_tools_json: list[dict[str, Any]] = Field(default_factory=list, sa_column=Column(JSON))
+    # 8. 最近一次同步时间
     last_synced_at: Optional[datetime] = None
     enabled: bool = True
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+# 0. 函数说明：模拟订单表（内置业务示例数据；用于演示工具调用效果）
+#    URL：无（ORM 表定义）
 class MockOrder(SQLModel, table=True):
     """模拟订单表：内置业务示例数据，用于演示工具调用。
 
@@ -727,23 +971,34 @@ class MockOrder(SQLModel, table=True):
 
     __tablename__ = "mock_orders"
 
+    # 1. 主键：订单ID（外部传入，如 "ORD-2024-001"）
     order_id: str = Field(primary_key=True)
     user_id: Optional[str] = Field(default=None, index=True)
     product_id: Optional[str] = Field(default=None, index=True)
     sku_id: Optional[str] = None
+    # 2. 购买数量（默认1）
     quantity: int = 1
+    # 3. 订单整体状态：created/paid/shipped/signed/closed/cancelled
     status: str = Field(default="created", index=True)
+    # 4. 支付状态（pending/paid/refunded 等）
     payment_status: Optional[str] = None
+    # 5. 订单履约状态（shipped/signed 等）
     order_status: Optional[str] = None
+    # 6. 已签收天数（用于判断是否超过退款期限）
     signed_days: int = 0
+    # 7. 是否可退款
     refundable: bool = True
+    # 8. 订单总金额
     total_amount: float = 0.0
+    # 9. 币种（默认人民币）
     currency: str = "CNY"
     metadata_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+# 0. 函数说明：聊天会话表（一次对话会话的完整运行时状态；含大量JSON字段用于中断恢复）
+#    URL：无（ORM 表定义）
 class ChatSession(SQLModel, table=True):
     """聊天会话表：一次对话会话的完整运行时状态。
 
@@ -755,27 +1010,42 @@ class ChatSession(SQLModel, table=True):
 
     __tablename__ = "sessions"
 
+    # 1. 主键：会话ID（外部传入，如 "session_xxxx"）
     id: str = Field(primary_key=True)
     tenant_id: str = Field(index=True)
     user_id: Optional[str] = Field(default=None, index=True)
     agent_id: Optional[str] = Field(default=None, index=True)
+    # 2. 会话标题（前端展示用）
     title: Optional[str] = None
+    # 3. 当前激活的技能/步骤（运行时状态）
     active_skill_id: Optional[str] = None
     active_step_id: Optional[str] = None
+    # 4. 槽位（技能步骤收集的用户输入）
     slots_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    # 5. 技能调用栈（嵌套调用时用于返回）
     skill_stack_json: list[dict[str, Any]] = Field(default_factory=list, sa_column=Column(JSON))
+    # 6. 待办任务（技能执行中产生的后续任务）
     pending_tasks_json: list[dict[str, Any]] = Field(default_factory=list, sa_column=Column(JSON))
+    # 7. 答案后恢复（用户回答问题后如何继续执行）
     resume_after_answer_json: Optional[dict[str, Any]] = Field(default=None, sa_column=Column(JSON))
+    # 8. 等待用户输入的状态（None=不在等待）
     awaiting_input_json: Optional[dict[str, Any]] = Field(default=None, sa_column=Column(JSON))
+    # 9. 知识上下文（检索结果缓存）
     knowledge_context_json: list[dict[str, Any]] = Field(default_factory=list, sa_column=Column(JSON))
+    # 10. 其他上下文状态（自由扩展）
     context_state_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    # 11. 会话摘要（列表页展示用）
     summary: Optional[str] = None
+    # 12. 最近Agent提出的问题（前端展示"继续回答"用）
     last_agent_question: Optional[str] = None
+    # 13. 会话状态：active/completed/awaiting_input 等
     status: str = "active"
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+# 0. 函数说明：人工转接请求表（智能体请求人工介入的记录；含触发上下文+恢复负载）
+#    URL：无（ORM 表定义）
 class HumanHandoffRequest(SQLModel, table=True):
     """人工转接请求表：智能体请求人工介入的记录。
 
@@ -786,25 +1056,35 @@ class HumanHandoffRequest(SQLModel, table=True):
 
     __tablename__ = "human_handoff_requests"
 
+    # 1. 主键
     id: str = Field(default_factory=lambda: new_id("handoff"), primary_key=True)
     tenant_id: str = Field(index=True)
     session_id: str = Field(index=True)
     agent_id: Optional[str] = Field(default=None, index=True)
+    # 2. 请求人/被指派人
     requester_user_id: Optional[str] = Field(default=None, index=True)
     assignee_user_id: Optional[str] = Field(default=None, index=True)
+    # 3. 触发上下文（哪个技能/步骤触发的转接）
     trigger_skill_id: Optional[str] = Field(default=None, index=True)
     trigger_step_id: Optional[str] = Field(default=None, index=True)
+    # 4. 上下文摘要 + 待回答问题
     context_summary: Optional[str] = None
     pending_question: Optional[str] = None
+    # 5. 处理状态：pending/answered/closed
     status: str = Field(default="pending", index=True)
+    # 6. 人工回复内容
     human_reply: Optional[str] = None
+    # 7. 恢复负载（人工回复后如何恢复Agent执行）
     resume_payload_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     metadata_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
+    # 8. 人工回复时间
     answered_at: Optional[datetime] = None
 
 
+# 0. 函数说明：定时任务表（周期性触发智能体的调度配置；含并发/误触/租约等控制）
+#    URL：无（ORM 表定义）
 class ScheduledTask(SQLModel, table=True):
     """定时任务表：周期性触发智能体的调度配置。
 
@@ -816,34 +1096,52 @@ class ScheduledTask(SQLModel, table=True):
 
     __tablename__ = "scheduled_tasks"
 
+    # 1. 主键
     id: str = Field(default_factory=lambda: new_id("sched"), primary_key=True)
     tenant_id: str = Field(index=True)
     agent_id: str = Field(index=True)
     created_by_user_id: str = Field(index=True)
+    # 2. 任务标题 + 触发提示词
     title: str
     prompt: str
     description: Optional[str] = None
+    # 3. 调度类型：once/hourly/daily/weekly/monthly
     schedule_type: str = Field(default="daily", index=True)
+    # 4. 调度参数（hour/minute/day_of_week 等）
     schedule_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    # 5. 时区（默认上海）
     timezone: str = Field(default="Asia/Shanghai", index=True)
+    # 6. iCalendar RRULE 字符串（高级调度）
     rrule: Optional[str] = None
+    # 7. 状态：active/paused/archived
     status: str = Field(default="active", index=True)
+    # 8. 并发策略：forbid（禁止并发）/ allow（允许）
     concurrency_policy: str = Field(default="forbid", index=True)
+    # 9. 误触策略：coalesce（合并）/ run（立即执行）
     misfire_policy: str = Field(default="coalesce", index=True)
+    # 10. 最大执行次数（None=无限）
     max_runs: Optional[int] = None
+    # 11. 任务结束时间（None=永不结束）
     end_at: Optional[datetime] = Field(default=None, index=True)
+    # 12. 下次/上次执行时间（调度器轮询用）
     next_run_at: Optional[datetime] = Field(default=None, index=True)
     last_run_at: Optional[datetime] = Field(default=None, index=True)
+    # 13. 上次执行状态：success/failed/running
     last_status: Optional[str] = Field(default=None, index=True)
+    # 14. 已执行次数
     run_count: int = 0
+    # 15. 租约（防止多实例重复执行）
     lease_owner: Optional[str] = Field(default=None, index=True)
     lease_until: Optional[datetime] = Field(default=None, index=True)
+    # 16. 来源会话ID（从聊天创建的定时任务会记录源会话）
     source_session_id: Optional[str] = Field(default=None, index=True)
     metadata_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+# 0. 函数说明：定时任务执行记录表（单次调度触发的执行实例；唯一约束防重复触发）
+#    URL：无（ORM 表定义）
 class ScheduledTaskRun(SQLModel, table=True):
     """定时任务执行记录表：单次调度触发的执行实例。
 
@@ -853,27 +1151,37 @@ class ScheduledTaskRun(SQLModel, table=True):
     """
 
     __tablename__ = "scheduled_task_runs"
+    # 1. 复合唯一约束：(scheduled_task_id, scheduled_for) 二元组唯一（防重复触发）
     __table_args__ = (
         UniqueConstraint("scheduled_task_id", "scheduled_for", name="uq_scheduled_task_run_due_time"),
     )
 
+    # 2. 主键
     id: str = Field(default_factory=lambda: new_id("schedrun"), primary_key=True)
     tenant_id: str = Field(index=True)
     scheduled_task_id: str = Field(index=True)
     agent_id: str = Field(index=True)
     user_id: str = Field(index=True)
     session_id: Optional[str] = Field(default=None, index=True)
+    # 3. 计划触发时间（UTC）
     scheduled_for: datetime = Field(index=True)
+    # 4. 执行状态：queued/running/success/failed
     status: str = Field(default="queued", index=True)
+    # 5. 实际开始/结束时间
     started_at: Optional[datetime] = Field(default=None, index=True)
     finished_at: Optional[datetime] = Field(default=None, index=True)
+    # 6. 结果摘要（Agent执行后产生）
     result_summary: Optional[str] = None
+    # 7. 错误信息（status=failed 时填充）
     error: Optional[str] = None
+    # 8. 执行轨迹（事件流，用于回放）
     trace_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+# 0. 函数说明：消息表（会话中的一条消息；role 区分 user/assistant/system）
+#    URL：无（ORM 表定义）
 class Message(SQLModel, table=True):
     """消息表：会话中的一条消息（用户输入或智能体输出）。
 
@@ -884,15 +1192,21 @@ class Message(SQLModel, table=True):
 
     __tablename__ = "messages"
 
+    # 1. 主键
     id: str = Field(default_factory=lambda: new_id("msg"), primary_key=True)
     tenant_id: str = Field(index=True)
     session_id: str = Field(index=True)
+    # 2. 消息角色：user/assistant/system
     role: str
+    # 3. 消息正文
     content: str
+    # 4. 附加元数据（引用、工具调用、turn_id 等）
     metadata_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=utc_now)
 
 
+# 0. 函数说明：消息反馈表（用户对单条消息的评分 + 自动分析结果；三元组唯一）
+#    URL：无（ORM 表定义）
 class MessageFeedback(SQLModel, table=True):
     """消息反馈表：用户对单条消息的评分与分析结果。
 
@@ -903,25 +1217,33 @@ class MessageFeedback(SQLModel, table=True):
     """
 
     __tablename__ = "message_feedback"
+    # 1. 复合唯一约束：(tenant_id, message_id, user_id) 三元组唯一
     __table_args__ = (UniqueConstraint("tenant_id", "message_id", "user_id", name="uq_feedback_message_user"),)
 
+    # 2. 主键
     id: str = Field(default_factory=lambda: new_id("fb"), primary_key=True)
     tenant_id: str = Field(index=True)
     session_id: str = Field(index=True)
     message_id: str = Field(index=True)
     user_id: str = Field(index=True)
+    # 3. 评分：up（赞）/ down（踩）
     rating: str = Field(index=True)
+    # 4. 分析状态：pending/running/completed/failed
     analysis_status: str = Field(default="pending", index=True)
+    # 5. 分析桶（问题分类，如 "answer_quality"/"knowledge_miss" 等）
     analysis_bucket: Optional[str] = Field(default=None, index=True)
     analysis_reason: Optional[str] = None
     analysis_summary: Optional[str] = None
     analysis_confidence: Optional[float] = None
+    # 6. 分析详情（LLM 原始输出等）
     analysis_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     analyzed_at: Optional[datetime] = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+# 0. 函数说明：技能反馈表（用户对某技能具体到步骤的评分；比 MessageFeedback 更细粒度）
+#    URL：无（ORM 表定义）
 class SkillFeedback(SQLModel, table=True):
     """技能反馈表：用户对某技能（具体到步骤）的评分。
 
@@ -931,21 +1253,27 @@ class SkillFeedback(SQLModel, table=True):
     """
 
     __tablename__ = "skill_feedback"
+    # 1. 复合唯一约束：(tenant_id, message_id, user_id) 三元组唯一
     __table_args__ = (UniqueConstraint("tenant_id", "message_id", "user_id", name="uq_skill_feedback_message_user"),)
 
+    # 2. 主键
     id: str = Field(default_factory=lambda: new_id("skillfb"), primary_key=True)
     tenant_id: str = Field(index=True)
     skill_id: str = Field(index=True)
     skill_version: Optional[str] = Field(default=None, index=True)
+    # 3. 具体步骤ID（可空，表示对整个技能的评价）
     step_id: Optional[str] = Field(default=None, index=True)
     session_id: str = Field(index=True)
     message_id: str = Field(index=True)
     user_id: str = Field(index=True)
+    # 4. 评分：up/down
     rating: str = Field(index=True)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+# 0. 函数说明：智能体事件表（执行过程中的事件流；用于审计/回放/前端轨迹展示）
+#    URL：无（ORM 表定义）
 class AgentEvent(SQLModel, table=True):
     """智能体事件表：智能体执行过程中的事件流。
 
@@ -955,14 +1283,19 @@ class AgentEvent(SQLModel, table=True):
 
     __tablename__ = "agent_events"
 
+    # 1. 主键
     id: str = Field(default_factory=lambda: new_id("evt"), primary_key=True)
     tenant_id: str = Field(index=True)
     session_id: str = Field(index=True)
+    # 2. 事件类型（如 user_message_received/router_decision_created/skill_started 等）
     event_type: str = Field(index=True)
+    # 3. 事件负载（按事件类型不同结构不同）
     payload_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=utc_now)
 
 
+# 0. 函数说明：记忆记录表（智能体的长期记忆条目；按重要度排序，支持跨会话个性化）
+#    URL：无（ORM 表定义）
 class MemoryRecord(SQLModel, table=True):
     """记忆记录表：智能体的长期记忆条目。
 
@@ -973,13 +1306,18 @@ class MemoryRecord(SQLModel, table=True):
 
     __tablename__ = "memories"
 
+    # 1. 主键
     id: str = Field(default_factory=lambda: new_id("mem"), primary_key=True)
     tenant_id: str = Field(index=True)
     user_id: str = Field(index=True)
+    # 2. 用户名（冗余字段，便于查询展示）
     username: Optional[str] = Field(default=None, index=True)
     session_id: Optional[str] = Field(default=None, index=True)
+    # 3. 记忆类型：conversation/fact/preference
     kind: str = Field(default="conversation", index=True)
+    # 4. 记忆正文
     content: str
+    # 5. 重要度评分（0.0~1.0，用于检索排序与遗忘策略）
     importance: float = 0.5
     metadata_json: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=utc_now)
