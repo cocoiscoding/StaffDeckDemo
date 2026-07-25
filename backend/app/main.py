@@ -114,14 +114,11 @@ def on_shutdown() -> None:
 
 @app.get("/api/health", tags=["health"])
 def health() -> dict[str, str]:
-    """健康检查端点。
-
-    用于负载均衡器或容器编排平台探测应用存活状态。
-
-    Returns:
-        包含 ``status`` 和 ``app`` 字段的状态字典。
-    """
-    return {"status": "ok", "app": "StaffDeck"}
+    # 健康检查端点
+    return {
+        "status": "ok", 
+        "app": settings.app_name
+    }
 
 
 # --- 注册所有业务路由模块 ---
