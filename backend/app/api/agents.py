@@ -90,6 +90,8 @@ chat_router = APIRouter(prefix="/api/chat/agents", tags=["chat:agents"])
 scope_router = APIRouter(prefix="/api/enterprise/agent-scope", tags=["enterprise:agent-scope"])
 
 
+# 0. 函数说明：获取指定租户下当前用户可见的 Agent 作用域（包含完整 Agent 列表）
+#    URL：GET /api/enterprise/agent-scope
 @scope_router.get("", response_model=AgentScopeRead)
 def get_agent_scope(
     tenant_id: str = Query(...),
@@ -106,11 +108,16 @@ def get_agent_scope(
     Returns:
         AgentScopeRead: 包含可见 Agent 列表的作用域对象。
     """
+    # 1. 校验租户存在
     ensure_tenant(db, tenant_id)
+    # 2. 校验租户匹配（防跨租户越权）
     _ensure_request_tenant(tenant_id, current_user)
+    # 3. 委托给list_agents取Agent列表，包装成AgentScopeRead返回
     return AgentScopeRead(tenant_id=tenant_id, agents=list_agents(tenant_id, db, current_user))
 
 
+# 0. 函数说明：获取指定租户下当前用户可见的 Agent 列表（按可见性过滤+完整 DTO 返回）
+#    URL：GET /api/enterprise/agents
 @enterprise_router.get("", response_model=list[AgentProfileRead])
 def list_agents(
     tenant_id: str = Query(...),
@@ -129,25 +136,34 @@ def list_agents(
     Returns:
         list[AgentProfileRead]: Agent 配置列表，按 is_overall 和更新时间排序。
     """
+    # 1. 校验租户存在
     ensure_tenant(db, tenant_id)
     user = current_user
+    # 2. 校验租户匹配
     _ensure_request_tenant(tenant_id, user)
+    # 3. 查该租户所有Agent（整体Agent优先，再按更新时间倒序）
     rows = db.exec(
         select(AgentProfile)
         .where(AgentProfile.tenant_id == tenant_id)
         .order_by(AgentProfile.is_overall.desc(), AgentProfile.updated_at.desc())
     ).all()
+    # 4. 过滤掉后端隐藏的Agent
     rows = [row for row in rows if not _agent_hidden_from_staffdeck(row)]
+    # 5. 非管理员追加可见性过滤（保留整体Agent作为只读源 + 用户可见的Agent）
     if not _is_admin_user(user):
-        # Non-admin users still need the overall agent as a read-only open-gallery
-        # source for copy/use flows. Mutations remain guarded by manage/update
-        # endpoints, so this only exposes the source scope.
+        # 注释：非管理员用户仍能看到整体Agent，作为只读的"开放画廊"源
+        # 用于复制/使用流程。修改操作由manage/update端点单独守卫，所以这里只暴露源作用域。
         rows = [row for row in rows if row.is_overall or _agent_visible_to_user(row, user)]
+    # 6. 一次性查该租户的所有资源绑定（避免N+1查询）
     bindings = _bindings_by_agent(db, tenant_id)
+    # 7. 取出当前用户"已使用"的Agent ID集合
     used_agent_ids = _used_agent_ids_for_user(db, tenant_id, user)
+    # 8. 逐个转成AgentProfileRead DTO返回
     return [agent_read(row, bindings.get(row.id, []), row.id in used_agent_ids) for row in rows]
 
 
+# 0. 函数说明：创建新的 Agent 配置（支持blank空白/copy从指定源/copy从整体画廊三种模式）
+#    URL：POST /api/enterprise/agents
 @enterprise_router.post("", response_model=AgentProfileRead)
 def create_agent(
     request: AgentProfileCreateRequest,
@@ -174,14 +190,20 @@ def create_agent(
         HTTPException 400: Agent 名称为空。
         HTTPException 409: Agent 名称已存在。
     """
+    # 1. 校验租户存在
     ensure_tenant(db, request.tenant_id)
     user = current_user
+    # 2. 校验租户匹配（防跨租户越权）
     _ensure_request_tenant(request.tenant_id, user)
+    # 3. 校验：只有管理员才能创建"整体Agent"
     if request.is_overall and not _is_admin_user(user):
         raise HTTPException(status_code=403, detail="Only administrator can create overall agent")
+    # 4. 规范化name（去空白）
     name = str(request.name or "").strip()
+    # 5. 校验name非空
     if not name:
         raise HTTPException(status_code=400, detail="Agent name cannot be empty")
+    # 6. 校验name唯一（同租户下不能重名）
     existing = db.exec(
         select(AgentProfile).where(
             AgentProfile.tenant_id == request.tenant_id, AgentProfile.name == name
@@ -189,6 +211,7 @@ def create_agent(
     ).first()
     if existing:
         raise HTTPException(status_code=409, detail="Agent name already exists")
+    # 7. 构造新Agent实体（状态默认active，metadata附上创建者信息）
     row = AgentProfile(
         tenant_id=request.tenant_id,
         name=name,
@@ -196,20 +219,25 @@ def create_agent(
         persona_prompt=request.persona_prompt,
         is_overall=request.is_overall,
         status="active",
-        metadata_json=_metadata_with_creator(request.metadata or {}, user),
+        metadata_json=_metadata_with_creator(request.metadata or {}, user),    # 附加created_by_user_id
     )
     db.add(row)
+    # 8. flush获取row.id（不commit，方便后续依赖id的操作）
     db.flush()
+    # 9. 非整体Agent：根据source_mode选择资源复制策略
     if not row.is_overall:
         copy_from_agent_id = request.copy_from_agent_id
+        # 9.1 blank模式：不复制任何资源，直接创建空白Agent
         if request.source_mode == "blank":
             pass
+        # 9.2 copy模式且指定了源Agent：从该Agent复制资源范围
         elif copy_from_agent_id:
             source_agent = _get_agent(db, request.tenant_id, copy_from_agent_id)
-            _ensure_can_copy_from_agent(source_agent, user)
+            _ensure_can_copy_from_agent(source_agent, user)    # 校验复制权限
             if not row.persona_prompt:
-                row.persona_prompt = source_agent.persona_prompt
+                row.persona_prompt = source_agent.persona_prompt    # 兜底persona_prompt
             _copy_agent_scope_from_source(db, request.tenant_id, source_agent, row)
+        # 9.3 copy模式但没指定源：从"整体Agent"的公共画廊复制
         else:
             overall = get_overall_agent(db, request.tenant_id)
             if overall and not row.persona_prompt:
@@ -217,11 +245,15 @@ def create_agent(
             copy_overall_scope_to_agent(db, request.tenant_id, row)
             if overall:
                 _copy_agent_models_from_source(db, request.tenant_id, overall, row)
+    # 10. 提交事务
     db.commit()
     db.refresh(row)
+    # 11. 转DTO返回（顺便取资源绑定用于agent_read）
     return agent_read(row, _bindings_by_agent(db, request.tenant_id).get(row.id, []))
 
 
+# 0. 函数说明：获取指定 Agent 的详细信息（含可见性校验）
+#    URL：GET /api/enterprise/agents/{agent_id}
 @enterprise_router.get("/{agent_id}", response_model=AgentProfileRead)
 def get_agent(
     agent_id: str,
@@ -244,11 +276,16 @@ def get_agent(
         HTTPException 404: Agent 不存在。
         HTTPException 403: 当前用户无权访问该 Agent。
     """
+    # 1. 按主键查Agent（不存在/不同租户 → 404）
     row = _get_agent(db, tenant_id, agent_id)
+    # 2. 校验当前用户有访问权限（不通过 → 403）
     _ensure_can_access_agent(row, current_user)
+    # 3. 转DTO返回（带上该Agent的资源绑定）
     return agent_read(row, _bindings_by_agent(db, tenant_id).get(row.id, []))
 
 
+# 0. 函数说明：获取 Agent 的工作记录（对话回复统计 + 资源绑定 + 定时任务时间线，按时区分组）
+#    URL：GET /api/enterprise/agents/{agent_id}/work-record
 @enterprise_router.get("/{agent_id}/work-record", response_model=AgentWorkRecordRead)
 def get_agent_work_record(
     agent_id: str,
@@ -276,30 +313,35 @@ def get_agent_work_record(
         HTTPException 400: 时区无效。
         HTTPException 404: Agent 不存在。
     """
+    # 1. 查Agent + 校验访问权限
     agent = _get_agent(db, tenant_id, agent_id)
     _ensure_can_access_agent(agent, current_user)
+    # 2. 解析时区（无效 → 400）
     try:
         local_timezone = ZoneInfo(timezone)
     except (ZoneInfoNotFoundError, ValueError) as exc:
         raise HTTPException(status_code=400, detail="Invalid timezone") from exc
 
+    # 3. 取出该用户在该Agent下所有assistant消息（按时间正序）
     now = utc_now()
     reply_rows = db.exec(
         select(Message)
         .join(ChatSession, Message.session_id == ChatSession.id)
         .where(
             Message.tenant_id == tenant_id,
-            Message.role == "assistant",
+            Message.role == "assistant",                                       # 只统计assistant消息
             ChatSession.tenant_id == tenant_id,
-            ChatSession.agent_id == agent_id,
-            ChatSession.user_id == current_user.id,
+            ChatSession.agent_id == agent_id,                                 # 该Agent下
+            ChatSession.user_id == current_user.id,                           # 当前用户的会话
         )
         .order_by(Message.created_at.asc())
     ).all()
+    # 4. 按日期分组统计回复数
     by_day: dict[str, int] = {}
+    # 5. 构造每个消息对应的事件行（kind=chat, phase=reply）
     events = [
         AgentWorkRecordEventRead(
-            id=f"{message.id}:reply",
+            id=f"{message.id}:reply",                                         # 用message.id作event.id（加:reply后缀）
             kind="chat",
             phase="reply",
             timestamp=_iso_utc(message.created_at),
@@ -307,27 +349,34 @@ def get_agent_work_record(
         )
         for message in reply_rows
     ]
+    # 6. 累加每天的回复数（按用户时区分组）
     for message in reply_rows:
         day = _as_utc(message.created_at).astimezone(local_timezone).date().isoformat()
         by_day[day] = by_day.get(day, 0) + 1
 
+    # 7. 追加资源绑定时间线事件
     events.extend(_agent_resource_timeline_events(db, tenant_id, agent_id))
+    # 8. 追加定时任务时间线事件（仅当前用户的）
     events.extend(_agent_scheduled_task_timeline_events(db, tenant_id, agent_id, current_user))
+    # 9. 按时间戳+id排序（保证顺序稳定）
     events.sort(key=lambda item: (item.timestamp, item.id))
+    # 10. 计算"今日"回复数（按用户时区）
     today = _as_utc(now).astimezone(local_timezone).date().isoformat()
     return AgentWorkRecordRead(
         agent_id=agent_id,
         timezone=timezone,
-        generated_at=_iso_utc(now),
+        generated_at=_iso_utc(now),                                                # 生成时间（ISO UTC）
         reply_stats=AgentWorkRecordReplyStatsRead(
-            total=len(reply_rows),
-            today=by_day.get(today, 0),
-            by_day=dict(sorted(by_day.items())),
+            total=len(reply_rows),                                                  # 累计回复总数
+            today=by_day.get(today, 0),                                            # 今日回复数
+            by_day=dict(sorted(by_day.items())),                                   # 按日期分组统计
         ),
-        events=events,
+        events=events,                                                              # 时间线事件列表
     )
 
 
+# 0. 函数说明：更新 Agent 配置信息（支持名称/描述/人设/状态/元数据，保留原始创建者）
+#    URL：PUT /api/enterprise/agents/{agent_id}
 @enterprise_router.put("/{agent_id}", response_model=AgentProfileRead)
 def update_agent(
     agent_id: str,
@@ -354,40 +403,52 @@ def update_agent(
         HTTPException 400: 名称为空。
         HTTPException 409: 名称已存在。
     """
+    # 1. 按主键查Agent
     row = _get_agent(db, request.tenant_id, agent_id)
     user = current_user
+    # 2. 校验管理权限（不通过 → 403）
     _ensure_can_manage_agent(row, user)
+    # 3. 处理name更新（含去空白/非空/唯一性校验）
     if request.name is not None:
         name = request.name.strip()
         if not name:
-            raise HTTPException(status_code=400, detail="Agent name cannot be empty")
+            raise HTTPException(status_code=400, detail="Agent name cannot be empty")    # 空字符串 → 400
+        # 3.1 校验name在同租户下不冲突（排除自己）
         conflict = db.exec(
             select(AgentProfile).where(
                 AgentProfile.tenant_id == request.tenant_id,
                 AgentProfile.name == name,
-                AgentProfile.id != row.id,
+                AgentProfile.id != row.id,    # 排除自己
             )
         ).first()
         if conflict:
-            raise HTTPException(status_code=409, detail="Agent name already exists")
+            raise HTTPException(status_code=409, detail="Agent name already exists")    # 重名 → 409
         row.name = name
+    # 4. 处理description更新（可选）
     if request.description is not None:
         row.description = request.description
+    # 5. 处理persona_prompt更新（可选）
     if request.persona_prompt is not None:
         row.persona_prompt = request.persona_prompt
+    # 6. 处理status更新（可选）
     if request.status is not None:
         row.status = request.status
+    # 7. 处理metadata更新（保留原始创建者信息）
     if request.metadata is not None:
         row.metadata_json = _metadata_preserving_creator(
             row.metadata_json or {}, request.metadata, user
         )
+    # 8. 更新updated_at时间戳
     row.updated_at = utc_now()
     db.add(row)
     db.commit()
     db.refresh(row)
+    # 9. 转DTO返回（带上该Agent的资源绑定）
     return agent_read(row, _bindings_by_agent(db, request.tenant_id).get(row.id, []))
 
 
+# 0. 函数说明：删除指定 Agent 及其所有资源绑定（不允许删除整体Agent）
+#    URL：DELETE /api/enterprise/agents/{agent_id}
 @enterprise_router.delete("/{agent_id}")
 def delete_agent(
     agent_id: str,
@@ -412,20 +473,29 @@ def delete_agent(
         HTTPException 400: 尝试删除整体 Agent。
         HTTPException 403: 当前用户无权管理该 Agent。
     """
+    # 1. 按主键查Agent
     row = _get_agent(db, tenant_id, agent_id)
+    # 2. 校验管理权限
     _ensure_can_manage_agent(row, current_user)
+    # 3. 拒绝删除整体Agent（防止破坏整体画廊）
     if row.is_overall:
         raise HTTPException(status_code=400, detail="Overall agent cannot be deleted")
+    # 4. 取出该Agent的所有资源绑定
     bindings = db.exec(
         select(AgentResourceBinding).where(AgentResourceBinding.agent_id == row.id)
     ).all()
+    # 5. 逐个删除资源绑定
     for binding in bindings:
         db.delete(binding)
+    # 6. 最后删Agent本身
     db.delete(row)
+    # 7. 一次性提交
     db.commit()
     return {"status": "deleted"}
 
 
+# 0. 函数说明：获取 Agent 绑定的所有资源列表（按资源类型+创建时间排序）
+#    URL：GET /api/enterprise/agents/{agent_id}/resources
 @enterprise_router.get("/{agent_id}/resources", response_model=list[AgentResourceBindingRead])
 def get_agent_resources(
     agent_id: str,
@@ -444,7 +514,9 @@ def get_agent_resources(
     Returns:
         list[AgentResourceBindingRead]: 资源绑定列表，按类型和创建时间排序。
     """
+    # 1. 校验访问权限（不存在/越权 → 404/403）
     _ensure_can_access_agent(_get_agent(db, tenant_id, agent_id), current_user)
+    # 2. 取出该Agent的所有资源绑定（按类型+创建时间排序）
     rows = db.exec(
         select(AgentResourceBinding)
         .where(
@@ -452,9 +524,12 @@ def get_agent_resources(
         )
         .order_by(AgentResourceBinding.resource_type, AgentResourceBinding.created_at)
     ).all()
+    # 3. 转DTO返回
     return [binding_read(row) for row in rows]
 
 
+# 0. 函数说明：全量更新 Agent 的资源绑定（替换式：传入完整列表，不在列表中的将被删除）
+#    URL：PUT /api/enterprise/agents/{agent_id}/resources
 @enterprise_router.put("/{agent_id}/resources", response_model=list[AgentResourceBindingRead])
 def update_agent_resources(
     agent_id: str,
@@ -480,28 +555,35 @@ def update_agent_resources(
         HTTPException 403: 当前用户无权管理该 Agent。
         HTTPException 404: 资源不存在。
     """
+    # 1. 查Agent + 校验管理权限
     agent = _get_agent(db, request.tenant_id, agent_id)
     _ensure_can_manage_agent(agent, current_user)
+    # 2. 整体Agent用全局资源池，不支持直接修改（→ 400）
     if agent.is_overall:
         raise HTTPException(status_code=400, detail="Overall agent uses the global resource pool")
+    # 3. 取出该Agent现有所有资源绑定
     existing = db.exec(
         select(AgentResourceBinding).where(
             AgentResourceBinding.tenant_id == request.tenant_id,
             AgentResourceBinding.agent_id == agent_id,
         )
     ).all()
+    # 4. 用(type, id)做key索引（便于O(1)查找）
     by_key = {(row.resource_type, row.resource_id): row for row in existing}
     desired_keys: set[tuple[str, str]] = set()
+    # 5. 遍历请求中的资源列表：每个都校验存在+新增/更新
     for item in request.resources:
-        _ensure_resource_exists(db, request.tenant_id, item)
+        _ensure_resource_exists(db, request.tenant_id, item)    # 校验资源存在（不存在 → 404）
         key = (item.resource_type, item.resource_id)
-        desired_keys.add(key)
+        desired_keys.add(key)    # 记录"需要保留的key"
         row = by_key.get(key)
         if row:
+            # 5.1 已有该key：更新status/metadata
             row.status = item.status
             row.metadata_json = item.metadata
             row.updated_at = utc_now()
         else:
+            # 5.2 没有该key：新建绑定
             row = AgentResourceBinding(
                 tenant_id=request.tenant_id,
                 agent_id=agent_id,
@@ -511,13 +593,18 @@ def update_agent_resources(
                 metadata_json=item.metadata,
             )
         db.add(row)
+    # 6. 删除"原有但不再需要"的绑定（diff 删除）
     for key, row in by_key.items():
         if key not in desired_keys:
             db.delete(row)
+    # 7. 提交事务
     db.commit()
+    # 8. 委托给get_agent_resources返回最新列表（递归调用本端点）
     return get_agent_resources(agent_id, request.tenant_id, db, current_user)
 
 
+# 0. 函数说明：从源 Agent 导入资源到目标 Agent（PG 改造后直接执行，不再有 SQLite 重试）
+#    URL：POST /api/enterprise/agents/{agent_id}/resources/import
 @enterprise_router.post("/{agent_id}/resources/import")
 def import_agent_resources(
     agent_id: str,
@@ -542,9 +629,12 @@ def import_agent_resources(
     Returns:
         dict[str, object]: 包含导入结果（imported/missing 列表）。
     """
+    # 1. 委托给内部函数执行（保留接口分离便于未来插入hook）
     return _import_agent_resources_once(agent_id, request, db, current_user)
 
 
+# 0. 函数说明：执行一次资源导入（PG 改造后无重试，逐个校验后绑定或标记缺失）
+#    URL：无（内部函数）
 def _import_agent_resources_once(
     agent_id: str,
     request: AgentResourceImportRequest,
@@ -565,29 +655,40 @@ def _import_agent_resources_once(
     Returns:
         dict[str, object]: 包含 imported 和 missing 列表的导入结果。
     """
+    # 1. 查目标/源两个Agent（不存在/不同租户 → 404）
     target_agent = _get_agent(db, request.tenant_id, agent_id)
     source_agent = _get_agent(db, request.tenant_id, request.source_agent_id)
     user = current_user
+    # 2. 双向权限校验：目标可导入 + 源可被复制
     _ensure_can_import_to_agent(target_agent, user)
     _ensure_can_copy_from_agent(source_agent, user)
+    # 3. 校验源≠目标
     if source_agent.id == target_agent.id:
         raise HTTPException(status_code=400, detail="Source and target agent cannot be the same")
+    # 4. 去重 + 校验至少选了一个资源
     resource_ids = _dedupe_ids(request.resource_ids)
     if not resource_ids:
         raise HTTPException(status_code=400, detail="No resources selected")
+    # 5. 准备导入/缺失两个列表
     imported: list[dict[str, object]] = []
     missing: list[dict[str, str]] = []
+    # 6. 遍历每个资源ID逐个处理
     for identifier in resource_ids:
+        # 6.1 解析资源（按display_id或真实id查找）
         resolved = _resolve_resource(db, request.tenant_id, request.resource_type, identifier)
+        # 6.2 找不到：加入missing并跳过
         if not resolved:
             missing.append({"resource_id": identifier, "reason": "resource_not_found"})
             continue
+        # 6.3 查源Agent上的绑定（用于可见性校验）
         source_binding = _source_resource_binding(
             db, request.tenant_id, source_agent, request.resource_type, resolved.id
         )
+        # 6.4 源不是整体Agent + 没有该绑定 → 不可见
         if not source_agent.is_overall and not source_binding:
             missing.append({"resource_id": identifier, "reason": "not_visible_in_source_agent"})
             continue
+        # 6.5 检查学习限制（开放画廊等是否允许复制）
         block_reason = _blocked_learning_reason(
             db,
             request.tenant_id,
@@ -599,6 +700,7 @@ def _import_agent_resources_once(
         if block_reason:
             missing.append({"resource_id": identifier, "reason": block_reason})
             continue
+        # 6.6 目标Agent是整体 → 导入到全局资源池；否则 → 在目标Agent上创建绑定
         if target_agent.is_overall:
             _import_resource_to_overall(
                 db, request.tenant_id, source_agent, request.resource_type, resolved
@@ -613,15 +715,18 @@ def _import_agent_resources_once(
                 resolved,
                 source_binding,
             )
+        # 6.7 加入导入成功列表
         imported.append(
             {
                 "resource_type": request.resource_type,
                 "resource_id": resolved.id,
-                "display_id": _resource_display_id(request.resource_type, resolved),
-                "name": getattr(resolved, "name", getattr(resolved, "slug", resolved.id)),
+                "display_id": _resource_display_id(request.resource_type, resolved),    # 显示用ID
+                "name": getattr(resolved, "name", getattr(resolved, "slug", resolved.id)),  # 兜底取name或slug
             }
         )
+    # 7. 提交事务
     db.commit()
+    # 8. 返回结果
     return {
         "status": "imported",
         "target_agent_id": target_agent.id,
@@ -777,6 +882,8 @@ def rollback_agent_skill(
     return {"status": "rolled_back", "skill_id": skill_id, "head_version": branch.head_version}
 
 
+# 0. 函数说明：获取 Agent 技能分支的所有历史版本列表
+#    URL：GET /api/enterprise/agents/{agent_id}/skills/{skill_id}/versions
 @enterprise_router.get("/{agent_id}/skills/{skill_id}/versions")
 def list_agent_skill_versions(
     agent_id: str,
@@ -797,7 +904,9 @@ def list_agent_skill_versions(
     Returns:
         list[dict[str, object]]: 版本记录列表，每条记录包含版本号、内容、变更摘要等。
     """
+    # 1. 校验访问权限
     _ensure_can_access_agent(_get_agent(db, tenant_id, agent_id), current_user)
+    # 2. 把每个版本记录转成dict返回
     return [
         {
             "id": row.id,
@@ -910,6 +1019,8 @@ def list_chat_agents(
     return [agent_read(row, bindings.get(row.id, []), row.id in used_agent_ids) for row in rows]
 
 
+# 0. 函数说明：标记用户使用了指定 Agent（记录使用关系+校验可见性）
+#    URL：POST /api/chat/agents/{agent_id}/use
 @chat_router.post("/{agent_id}/use", response_model=AgentProfileRead)
 def use_chat_agent(
     agent_id: str,
@@ -933,17 +1044,23 @@ def use_chat_agent(
     Raises:
         HTTPException 403: 租户不匹配或无权使用该 Agent。
     """
+    # 1. 校验租户匹配（→ 403）
     if tenant_id != current_user.tenant_id:
         raise HTTPException(status_code=403, detail="Tenant mismatch")
+    # 2. 校验租户存在
     ensure_tenant(db, tenant_id)
+    # 3. 查Agent
     row = _get_agent(db, tenant_id, agent_id)
+    # 4. 多维校验：不是整体 + 状态active + 用户可见（任一不符 → 403）
     if (
         row.is_overall
         or row.status != "active"
         or not _chat_agent_visible_to_user(row, current_user)
     ):
         raise HTTPException(status_code=403, detail="Cannot access this agent")
+    # 5. 标记用户已使用（upsert AgentUsage）
     _mark_agent_used(db, tenant_id, current_user, row.id)
+    # 6. 转DTO返回（is_used=True）
     bindings = _bindings_by_agent(db, tenant_id)
     return agent_read(row, bindings.get(row.id, []), True)
 
@@ -1076,6 +1193,8 @@ def _agent_resource_timeline_events(
     return events
 
 
+# 0. 函数说明：构建 Agent 定时任务的时间线事件列表（每个任务生成last_run和next_run两条事件）
+#    URL：无（辅助函数）
 def _agent_scheduled_task_timeline_events(
     db: Session,
     tenant_id: str,
@@ -1095,19 +1214,23 @@ def _agent_scheduled_task_timeline_events(
     Returns:
         list[AgentWorkRecordEventRead]: 定时任务事件列表。
     """
+    # 1. 构造查询条件：租户+Agent+非archived
     conditions = [
         ScheduledTask.tenant_id == tenant_id,
         ScheduledTask.agent_id == agent_id,
-        ScheduledTask.status != "archived",
+        ScheduledTask.status != "archived",    # 排除已归档
     ]
+    # 2. 非管理员追加过滤：只能看自己创建的
     if not _is_admin_user(current_user):
         conditions.append(ScheduledTask.created_by_user_id == current_user.id)
+    # 3. 执行查询
     tasks = db.exec(select(ScheduledTask).where(*conditions)).all()
+    # 4. 为每个任务生成最多2条事件（last_run + next_run，仅当时间存在时）
     events: list[AgentWorkRecordEventRead] = []
     for task in tasks:
         for phase, timestamp in (("last_run", task.last_run_at), ("next_run", task.next_run_at)):
             if not timestamp:
-                continue
+                continue    # 没时间戳 → 跳过
             events.append(
                 AgentWorkRecordEventRead(
                     id=f"{task.id}:{phase}",
@@ -1120,18 +1243,27 @@ def _agent_scheduled_task_timeline_events(
     return events
 
 
+# 0. 函数说明：将 datetime 转换为 UTC 时区（无时区信息时视为 UTC）
+#    URL：无（辅助函数）
 def _as_utc(value: datetime) -> datetime:
     """将 datetime 转换为 UTC 时区（如果无时区信息则视为 UTC）。"""
+    # 1. 无tzinfo → 视为UTC（直接替换）
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
+    # 2. 有tzinfo → 转换到UTC
     return value.astimezone(UTC)
 
 
+# 0. 函数说明：将 datetime 格式化为 ISO 8601 UTC 字符串（以Z结尾）
+#    URL：无（辅助函数）
 def _iso_utc(value: datetime) -> str:
     """将 datetime 格式化为 ISO 8601 UTC 字符串（以 Z 结尾）。"""
+    # 1. 先转UTC，再序列化为ISO，最后把"+00:00"替换为"Z"
     return _as_utc(value).isoformat().replace("+00:00", "Z")
 
 
+# 0. 函数说明：将数据库 AgentProfile 对象转换为 API 响应模型 AgentProfileRead
+#    URL：无（DTO转换器）
 def agent_read(
     row: AgentProfile,
     bindings: list[AgentResourceBinding],
@@ -1147,10 +1279,13 @@ def agent_read(
     Returns:
         AgentProfileRead: Agent 配置读取模型。
     """
+    # 1. 浅拷贝metadata（避免污染原对象）
     metadata = dict(row.metadata_json or {})
+    # 2. 注入"是否已被当前用户使用"标志位（兼容两个字段名）
     if used_by_current_user is not None:
         metadata["used_by_current_user"] = used_by_current_user
         metadata["chat_used_by_current_user"] = used_by_current_user
+    # 3. 构造DTO并返回（含资源绑定转换）
     return AgentProfileRead(
         id=row.id,
         tenant_id=row.tenant_id,
@@ -1160,18 +1295,23 @@ def agent_read(
         is_overall=row.is_overall,
         status=row.status,
         metadata=metadata,
-        resources=[binding_read(binding) for binding in bindings],
+        resources=[binding_read(binding) for binding in bindings],    # 绑定转DTO
         created_at=row.created_at.isoformat(),
         updated_at=row.updated_at.isoformat(),
     )
 
 
+# 0. 函数说明：校验请求的租户 ID 与当前用户的租户 ID 匹配（防越权）
+#    URL：无（辅助函数）
 def _ensure_request_tenant(tenant_id: str, user: User) -> None:
     """验证请求的租户 ID 与当前用户的租户 ID 匹配。"""
+    # 1. 不一致 → 403
     if user.tenant_id != tenant_id:
         raise HTTPException(status_code=403, detail="Tenant mismatch")
 
 
+# 0. 函数说明：判断 Agent 是否对指定用户可见（管理员/整体/拥有/画廊发布，任一即可）
+#    URL：无（辅助函数）
 def _agent_visible_to_user(row: AgentProfile, user: User) -> bool:
     """判断 Agent 是否对指定用户可见。
 
@@ -1184,28 +1324,41 @@ def _agent_visible_to_user(row: AgentProfile, user: User) -> bool:
     Returns:
         True 表示 Agent 对该用户可见。
     """
+    # 1. 后端隐藏的Agent → 不可见
     if _agent_hidden_from_staffdeck(row):
         return False
+    # 2. 管理员 → 全部可见
     if _is_admin_user(user):
         return True
+    # 3. 整体Agent → 全部可见
     if row.is_overall:
         return True
+    # 4. 普通用户：必须拥有该Agent 或 Agent已发布到画廊
     metadata = row.metadata_json or {}
     return _agent_owned_by_user(row, user) or metadata.get("published_to_gallery") is True
 
 
+# 0. 函数说明：检查 Agent 是否被标记为从 StaffDeck 界面隐藏
+#    URL：无（辅助函数）
 def _agent_hidden_from_staffdeck(row: AgentProfile) -> bool:
     """检查 Agent 是否被标记为从 StaffDeck 界面隐藏。"""
+    # 1. metadata.hidden_from_staffdeck === True 即视为隐藏
     return (row.metadata_json or {}).get("hidden_from_staffdeck") is True
 
 
+# 0. 函数说明：检查 Agent 是否已发布到公共画廊
+#    URL：无（辅助函数）
 def _agent_published_to_gallery(row: AgentProfile) -> bool:
     """检查 Agent 是否已发布到公共画廊。"""
+    # 1. metadata.published_to_gallery === True 即视为已发布
     return (row.metadata_json or {}).get("published_to_gallery") is True
 
 
+# 0. 函数说明：获取用户已使用的 Agent ID 集合（来自 AgentUsage 记录 + ChatSession 记录）
+#    URL：无（辅助函数）
 def _used_agent_ids_for_user(db: Session, tenant_id: str, user: User) -> set[str]:
     """获取用户已使用的 Agent ID 集合（来自 AgentUsage 记录和 ChatSession 记录）。"""
+    # 1. 查AgentUsage表（用户主动点过"use"的）
     usage_rows = db.exec(
         select(AgentUsage.agent_id).where(
             AgentUsage.tenant_id == tenant_id,
@@ -1213,6 +1366,7 @@ def _used_agent_ids_for_user(db: Session, tenant_id: str, user: User) -> set[str
             AgentUsage.agent_id != None,  # noqa: E711
         )
     ).all()
+    # 2. 查ChatSession表（用户实际发起过会话的）
     session_rows = db.exec(
         select(ChatSession.agent_id).where(
             ChatSession.tenant_id == tenant_id,
@@ -1220,9 +1374,12 @@ def _used_agent_ids_for_user(db: Session, tenant_id: str, user: User) -> set[str
             ChatSession.agent_id != None,  # noqa: E711
         )
     ).all()
+    # 3. 合并两个来源去None后返回set
     return {str(agent_id) for agent_id in [*usage_rows, *session_rows] if agent_id}
 
 
+# 0. 函数说明：记录用户使用了某个 Agent（创建或更新使用记录，处理并发冲突）
+#    URL：无（辅助函数）
 def _mark_agent_used(db: Session, tenant_id: str, user: User, agent_id: str) -> AgentUsage:
     """记录用户使用了某个 Agent（创建或更新使用记录）。
 
@@ -1237,6 +1394,7 @@ def _mark_agent_used(db: Session, tenant_id: str, user: User, agent_id: str) -> 
     Returns:
         AgentUsage 使用记录对象。
     """
+    # 1. 先查现有记录
     row = db.exec(
         select(AgentUsage).where(
             AgentUsage.tenant_id == tenant_id,
@@ -1244,14 +1402,17 @@ def _mark_agent_used(db: Session, tenant_id: str, user: User, agent_id: str) -> 
             AgentUsage.agent_id == agent_id,
         )
     ).first()
+    # 2. 有：只更新时间；没有：新建
     if row:
         row.updated_at = utc_now()
     else:
         row = AgentUsage(tenant_id=tenant_id, user_id=user.id, agent_id=agent_id)
     db.add(row)
+    # 3. 尝试提交（并发场景可能唯一约束冲突）
     try:
         db.commit()
     except IntegrityError:
+        # 3.1 冲突 → 回滚并重新查现有记录
         db.rollback()
         row = db.exec(
             select(AgentUsage).where(
@@ -1260,12 +1421,15 @@ def _mark_agent_used(db: Session, tenant_id: str, user: User, agent_id: str) -> 
                 AgentUsage.agent_id == agent_id,
             )
         ).first()
+        # 3.2 还查不到 → 重新抛出原异常
         if not row:
             raise
     db.refresh(row)
     return row
 
 
+# 0. 函数说明：判断 Agent 在聊天侧是否可被用户选择（排除整体Agent，按拥有/画廊+已用/管理员三档）
+#    URL：无（辅助函数）
 def _chat_agent_selectable_to_user(row: AgentProfile, user: User, used_agent_ids: set[str]) -> bool:
     """判断 Agent 在聊天界面是否可被用户选择。
 
@@ -1279,30 +1443,43 @@ def _chat_agent_selectable_to_user(row: AgentProfile, user: User, used_agent_ids
     Returns:
         True 表示该 Agent 在聊天界面可被选择。
     """
+    # 1. 整体Agent不可选
     if row.is_overall:
         return False
+    # 2. 用户拥有 → 可选
     if _agent_owned_by_user(row, user):
         return True
+    # 3. 画廊已发布 → 必须用户已使用过才可选
     if _agent_published_to_gallery(row):
         return row.id in used_agent_ids
+    # 4. 其他情况：仅管理员可选
     return _is_admin_user(user)
 
 
+# 0. 函数说明：校验用户是否有权访问指定 Agent（租户匹配 + 可见）
+#    URL：无（辅助函数）
 def _ensure_can_access_agent(row: AgentProfile, user: User) -> None:
     """验证用户是否有权访问指定 Agent。"""
+    # 1. 双重校验：租户匹配 + 可见性
     _ensure_request_tenant(row.tenant_id, user)
     if not _agent_visible_to_user(row, user):
         raise HTTPException(status_code=403, detail="Cannot access this agent")
 
 
+# 0. 函数说明：校验用户是否有权从指定 Agent 复制资源（整体 或 可见 即可）
+#    URL：无（辅助函数）
 def _ensure_can_copy_from_agent(row: AgentProfile, user: User) -> None:
     """验证用户是否有权从指定 Agent 复制资源（整体 Agent 或可见 Agent）。"""
+    # 1. 校验租户匹配
     _ensure_request_tenant(row.tenant_id, user)
+    # 2. 整体Agent 或 用户可见 → 允许
     if row.is_overall or _agent_visible_to_user(row, user):
         return
     raise HTTPException(status_code=403, detail="Cannot copy resources from this agent")
 
 
+# 0. 函数说明：校验用户是否有权管理（修改/删除）指定 Agent（管理员 或 创建者）
+#    URL：无（辅助函数）
 def _ensure_can_manage_agent(row: AgentProfile, user: User) -> None:
     """验证用户是否有权管理（修改/删除）指定 Agent。
 
@@ -1311,28 +1488,40 @@ def _ensure_can_manage_agent(row: AgentProfile, user: User) -> None:
     Raises:
         HTTPException 403: 无管理权限。
     """
+    # 1. 校验租户匹配
     _ensure_request_tenant(row.tenant_id, user)
+    # 2. 管理员 → 通过
     if _is_admin_user(user):
         return
+    # 3. 整体Agent 只能管理员管理 → 403
     if row.is_overall:
         raise HTTPException(status_code=403, detail="Only administrator can manage overall agent")
+    # 4. Agent 创建者 → 通过
     if _agent_owned_by_user(row, user):
         return
+    # 5. 其他 → 403
     raise HTTPException(
         status_code=403, detail="Only the creator or administrator can manage this staff"
     )
 
 
+# 0. 函数说明：校验是否有权向目标 Agent 导入资源（整体Agent需管理员，其他需管理权限）
+#    URL：无（辅助函数）
 def _ensure_can_import_to_agent(row: AgentProfile, user: User) -> None:
     """验证用户是否有权向目标 Agent 导入资源（整体 Agent 需管理员，其他需管理权限）。"""
+    # 1. 整体Agent → 必须管理员
     if row.is_overall:
         _ensure_admin_user(row.tenant_id, user)
         return
+    # 2. 非整体Agent → 委托给管理权限校验
     _ensure_can_manage_agent(row, user)
 
 
+# 0. 函数说明：校验当前用户是否为指定租户的管理员
+#    URL：无（辅助函数）
 def _ensure_admin_user(tenant_id: str, user: User) -> None:
     """验证当前用户是否为指定租户的管理员。"""
+    # 1. 双重校验：租户匹配 + 管理员身份
     _ensure_request_tenant(tenant_id, user)
     if not _is_admin_user(user):
         raise HTTPException(
@@ -1340,10 +1529,14 @@ def _ensure_admin_user(tenant_id: str, user: User) -> None:
         )
 
 
+# 0. 函数说明：在元数据中添加当前用户的创建者信息（一次性写入8个字段）
+#    URL：无（辅助函数）
 def _metadata_with_creator(metadata: dict[str, object], user: User) -> dict[str, object]:
     """在元数据中添加当前用户的创建者信息。"""
+    # 1. 浅拷贝 + 准备显示名（兜底用username）
     normalized = dict(metadata or {})
     display_name = user.display_name or user.username
+    # 2. 写入8个创建者字段（兼容多种命名，便于前端不同位置读取）
     normalized["owner_user_id"] = user.id
     normalized["owner_username"] = user.username
     normalized["owner_display_name"] = display_name
@@ -1355,13 +1548,17 @@ def _metadata_with_creator(metadata: dict[str, object], user: User) -> dict[str,
     return normalized
 
 
+# 0. 函数说明：更新元数据但保留原始创建者字段（防止编辑覆盖创建者）
+#    URL：无（辅助函数）
 def _metadata_preserving_creator(
     existing_metadata: dict[str, object],
     next_metadata: dict[str, object],
     user: User,
 ) -> dict[str, object]:
     """更新元数据但保留原始创建者字段（防止编辑操作覆盖创建者信息）。"""
+    # 1. 浅拷贝新metadata（避免修改入参）
     normalized = dict(next_metadata or {})
+    # 2. 遍历8个创建者字段：原值有效则覆盖新值（保证创建者不被篡改）
     for key in (
         "owner_user_id",
         "owner_username",
@@ -1374,12 +1571,15 @@ def _metadata_preserving_creator(
     ):
         existing_value = existing_metadata.get(key)
         if isinstance(existing_value, str) and existing_value.strip():
-            normalized[key] = existing_value
+            normalized[key] = existing_value    # 原值非空字符串 → 保留
     return normalized
 
 
+# 0. 函数说明：判断 Agent 在聊天侧是否对用户可见（直接委托给 _agent_visible_to_user）
+#    URL：无（辅助函数）
 def _chat_agent_visible_to_user(row: AgentProfile, user: User) -> bool:
     """判断 Agent 在聊天侧是否对用户可见（委托给 _agent_visible_to_user）。"""
+    # 1. 委托给通用可见性判断
     return _agent_visible_to_user(row, user)
 
 
