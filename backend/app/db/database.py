@@ -39,6 +39,8 @@ from sqlmodel import Session, SQLModel, create_engine
 
 # 4. 项目内：全局配置单例（提供 database_url 等参数）
 from app.config import get_settings
+# 5. 项目内：KingbaseES PG 兼容模式适配（对原生 PostgreSQL 零影响，仅版本解析失败时生效）
+from app.db import kingbase_compat  # noqa: F401
 
 
 # 1. 加载全局配置（单例），用于读取数据库连接字符串等参数。
