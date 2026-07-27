@@ -74,7 +74,7 @@ cp backend/.env.example backend/.env
 scripts/dev_up.sh --detach
 ```
 
-打开 http://127.0.0.1:5173/workspace/gallery，默认管理员账号：`admin` / `admin`。
+打开 http://127.0.0.1:5173/workspace/gallery。
 
 ## 技术栈
 

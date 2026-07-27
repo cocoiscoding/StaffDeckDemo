@@ -74,7 +74,7 @@ cp backend/.env.example backend/.env
 scripts/dev_up.sh --detach
 ```
 
-Visit http://127.0.0.1:5173/workspace/gallery — default admin login: `admin` / `admin`.
+Visit http://127.0.0.1:5173/workspace/gallery.
 
 ## Tech stack
 
