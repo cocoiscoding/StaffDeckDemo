@@ -58,3 +58,6 @@ k8s/staffdeck.yaml
 # 本地开发命令记录
 dev-commands.md
 CLAUDE.md
+
+# Trae IDE 配置目录（不应进仓库）
+.trae/
