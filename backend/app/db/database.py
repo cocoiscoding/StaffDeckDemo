@@ -61,7 +61,7 @@ database_url: str = settings.database_url
 engine: Engine = create_engine(
     database_url,
     echo=False,                # 不打印 SQL（调试时改 True）
-    poolclass=QueuePool,       # 使用队列连接池（默认即此类型，显式声明便于阅读）
+    poolclass=QueuePool,       # 连接池
     pool_pre_ping=True,        # 取连接前 ping 一次
     pool_recycle=3600,         # 连接最大存活 1 小时
     pool_size=10,              # 基础连接数
