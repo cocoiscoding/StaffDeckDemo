@@ -47,7 +47,7 @@ def main() -> int:
     print("\n[2/7] admin 登录...")
     login = post(
         "/api/auth/login",
-        {"tenant_id": "tenant_demo", "username": "admin", "password": "kPT7OSb!^jL#WB"},
+        {"tenant_id": "tenant_demo", "username": "admin", "password": ""},
     )
     token = login.get("token", "")
     assert token, f"admin 登录失败: {login}"

@@ -910,7 +910,7 @@ def seed_demo_data(session: Session) -> None:
             )
         )
 
-    # 桌面/单机版默认管理员账号（admin / admin）。权限只读取数据库 role 字段。
+    # 桌面/单机版默认管理员账号（用户名 admin）。权限只读取数据库 role 字段。
     admin_user = session.exec(
         select(User).where(User.tenant_id == "tenant_demo", User.username == "admin")
     ).first()
