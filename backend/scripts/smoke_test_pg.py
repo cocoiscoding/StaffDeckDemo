@@ -60,7 +60,7 @@ def main() -> int:
     try:
         login = post(
             "/api/auth/login",
-            {"tenant_id": "tenant_demo", "username": "user_demo", "password": "Xmffpvl8%Ow9&a"},
+            {"tenant_id": "tenant_demo", "username": "user_demo", "password": ""},
         )
         token = login.get("token") or login.get("access_token", "")
         assert token, f"未获取到 token: {login}"
